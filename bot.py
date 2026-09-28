@@ -235,6 +235,12 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     print(f"Auto-detected Channel ID: {channel_id}")
 
 def main():
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
     app = ApplicationBuilder().token(config['telegram_bot_token']).build()
     
     app.add_handler(CommandHandler("start", start))
