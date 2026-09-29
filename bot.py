@@ -172,14 +172,17 @@ async def extract_media_from_twitter(list_id):
     return extracted_items
 
 async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    await context.bot.send_message(chat_id=chat_id, text="🚀 Firing up custom Chromium scraper... (This takes about 20 seconds)")
+    await context.bot.send_message(chat_id=chat_id, text="🔄 Scraping Twitter list...")
     
     try:
         if not config['twitter_auth_token'] or not config['twitter_ct0']:
             await context.bot.send_message(chat_id=chat_id, text="Error: Missing Twitter cookies in environment variables!")
             return
             
-        items = await extract_media_from_twitter(config['twitter_list_url'])
+        # Extract numeric list ID from URL like https://x.com/i/lists/2078086710118715619
+        list_url = config['twitter_list_url']
+        list_id = list_url.rstrip('/').split('/')[-1]
+        items = await extract_media_from_twitter(list_id)
         
         count = 0
         for item in items:
@@ -233,9 +236,9 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
         media_bytes = await fetch_media(next_item['url'])
         
         if next_item['type'] == 'photo':
-            await context.bot.send_photo(chat_id=chat_id, photo=media_bytes, caption=caption, reply_markup=reply_markup)
+            await context.bot.send_photo(chat_id=chat_id, photo=media_bytes, caption=caption, reply_markup=reply_markup, parse_mode="Markdown")
         else:
-            await context.bot.send_video(chat_id=chat_id, video=media_bytes, caption=caption, reply_markup=reply_markup)
+            await context.bot.send_video(chat_id=chat_id, video=media_bytes, caption=caption, reply_markup=reply_markup, parse_mode="Markdown")
             
         await status_msg.delete()
     except Exception as e:
