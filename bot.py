@@ -5,6 +5,7 @@ import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from apify_client import ApifyClient
+from playwright.async_api import async_playwright
 
 # Config from environment variables
 config = {
@@ -12,6 +13,8 @@ config = {
     'telegram_channel_id': os.environ.get('TELEGRAM_CHANNEL_ID', ''),
     'twitter_list_url': os.environ.get('TWITTER_LIST_URL', ''),
     'apify_api_token': os.environ.get('APIFY_API_TOKEN', ''),
+    'twitter_auth_token': os.environ.get('TWITTER_AUTH_TOKEN', ''),
+    'twitter_ct0': os.environ.get('TWITTER_CT0', '')
 }
 
 PORT = int(os.environ.get('PORT', 10000))
@@ -47,46 +50,90 @@ def save_data(tweet_queue, history):
 
 tweet_queue, history = load_data()
 
+async def extract_media_from_twitter(url):
+    extracted_items = []
+    
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'])
+        context = await browser.new_context()
+        
+        await context.add_cookies([
+            {"name": "auth_token", "value": config['twitter_auth_token'], "domain": ".x.com", "path": "/"},
+            {"name": "ct0", "value": config['twitter_ct0'], "domain": ".x.com", "path": "/"}
+        ])
+        
+        page = await context.new_page()
+        
+        async def handle_response(response):
+            if "graphql" in response.url and ("ListLatestTweetsTimeline" in response.url or "ListLatest" in response.url):
+                try:
+                    data = await response.json()
+                    instructions = data.get('data', {}).get('list', {}).get('tweets_timeline', {}).get('timeline', {}).get('instructions', [])
+                    for inst in instructions:
+                        if inst.get('type') == 'TimelineAddEntries':
+                            for entry in inst.get('entries', []):
+                                content = entry.get('content', {})
+                                if content.get('entryType') == 'TimelineTimelineItem':
+                                    result = content.get('itemContent', {}).get('tweet_results', {}).get('result', {})
+                                    tweet = result.get('legacy', {})
+                                    core = result.get('core', {}).get('user_results', {}).get('result', {}).get('legacy', {})
+                                    screen_name = core.get('screen_name', 'unknown')
+                                    tweet_id = tweet.get('id_str', '')
+                                    tweet_url = f"https://vxtwitter.com/{screen_name}/status/{tweet_id}"
+                                    tweet_text = tweet.get('full_text', '')
+                                    
+                                    if 'retweeted_status_result' in tweet:
+                                        tweet = tweet['retweeted_status_result']['result'].get('legacy', {})
+                                        
+                                    media = tweet.get('extended_entities', {}).get('media', [])
+                                    
+                                    for m in media:
+                                        media_obj = {'tweet_url': tweet_url, 'text': tweet_text}
+                                        if m.get('type') in ['video', 'animated_gif']:
+                                            variants = m.get('video_info', {}).get('variants', [])
+                                            mp4s = [v for v in variants if v.get('content_type') == 'video/mp4']
+                                            if mp4s:
+                                                best = max(mp4s, key=lambda x: x.get('bitrate', 0))
+                                                media_obj['url'] = best['url']
+                                                media_obj['type'] = 'video'
+                                                extracted_items.append(media_obj)
+                                        elif m.get('type') == 'photo':
+                                            media_obj['url'] = m['media_url_https']
+                                            media_obj['type'] = 'photo'
+                                            extracted_items.append(media_obj)
+                except Exception as e:
+                    pass
+
+        page.on("response", handle_response)
+        
+        await page.goto(url)
+        
+        for _ in range(8):
+            await page.mouse.wheel(0, 5000)
+            await asyncio.sleep(2)
+            
+        await browser.close()
+    return extracted_items
+
 async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    await context.bot.send_message(chat_id=chat_id, text="🔄 Auto-scraping Twitter List to refill queue... (Digging into history, this takes about 90 seconds)")
+    await context.bot.send_message(chat_id=chat_id, text="🚀 Firing up custom Chromium scraper... (This takes about 20 seconds)")
     
     try:
-        # Increase from 100 to 500 so it can dig deeper for new items
-        run = apify_client.actor("apidojo/tweet-scraper").call(run_input={
-            "startUrls": [{"url": config['twitter_list_url']}],
-            "tweetsDesired": 500,
-        })
-        
-        dataset_id = run.default_dataset_id if hasattr(run, 'default_dataset_id') else run['defaultDatasetId']
+        if not config['twitter_auth_token'] or not config['twitter_ct0']:
+            await context.bot.send_message(chat_id=chat_id, text="Error: Missing Twitter cookies in environment variables!")
+            return
+            
+        items = await extract_media_from_twitter(config['twitter_list_url'])
         
         count = 0
-        for item in apify_client.dataset(dataset_id).iterate_items():
-            if item.get('extendedEntities') and item['extendedEntities'].get('media'):
-                url = item.get('url', '')
-                vx_url = url.replace('twitter.com', 'vxtwitter.com').replace('x.com', 'vxtwitter.com')
+        for item in items:
+            if item['url'] not in history and not any(q.get('url') == item['url'] for q in tweet_queue):
+                tweet_queue.append(item)
+                history.append(item['url'])
+                count += 1
                 
-                for m in item['extendedEntities']['media']:
-                    media_obj = {'tweet_url': vx_url, 'text': item.get('text', '')}
-                    if m['type'] == 'photo':
-                        media_obj['type'] = 'photo'
-                        media_obj['url'] = m['media_url_https']
-                    elif m['type'] in ['video', 'animated_gif']:
-                        media_obj['type'] = 'video'
-                        variants = m.get('video_info', {}).get('variants', [])
-                        mp4_variants = [v for v in variants if v.get('content_type') == 'video/mp4']
-                        if mp4_variants:
-                            best_variant = max(mp4_variants, key=lambda x: x.get('bitrate', 0))
-                            media_obj['url'] = best_variant['url']
-                        else:
-                            continue
-                            
-                    if media_obj['url'] not in history and not any(q.get('url') == media_obj['url'] for q in tweet_queue):
-                        tweet_queue.append(media_obj)
-                        history.append(media_obj['url'])
-                        count += 1
-                    
         save_data(tweet_queue, history)
-        await context.bot.send_message(chat_id=chat_id, text=f"✅ Added {count} new items! Total in queue: {len(tweet_queue)}")
+        await context.bot.send_message(chat_id=chat_id, text=f"✅ Scraped {len(items)} posts, found {count} brand new ones! Total in queue: {len(tweet_queue)}")
     except Exception as e:
         await context.bot.send_message(chat_id=chat_id, text=f"Error scraping: {e}")
 
@@ -94,6 +141,11 @@ async def scrape_tweets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await do_scrape(context, update.message.chat_id)
     if tweet_queue:
         await send_next_tweet(update.message.chat_id, context)
+
+async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    history.clear()
+    save_data(tweet_queue, history)
+    await update.message.reply_text("🗑️ History cleared! The scraper will now re-fetch older tweets as if they were brand new.")
 
 async def fetch_media(url):
     async with httpx.AsyncClient() as client:
@@ -256,6 +308,7 @@ async def post_init(application: Application):
         ("scrape", "Force a manual scrape for more media"),
         ("drip", "Auto-send media on a schedule (e.g. /drip 10)"),
         ("stopdrip", "Stop auto-sending"),
+        ("clearhistory", "Wipe the scraper's memory so you can see old tweets again"),
         ("channel", "Set your private channel ID"),
     ])
 
@@ -270,6 +323,7 @@ def main():
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("scrape", scrape_tweets))
+    app.add_handler(CommandHandler("clearhistory", clear_history))
     app.add_handler(CommandHandler("next", next_command))
     app.add_handler(CommandHandler("channel", set_channel))
     app.add_handler(CommandHandler("drip", start_drip))
