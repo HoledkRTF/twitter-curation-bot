@@ -25,7 +25,7 @@ apify_client = ApifyClient(config['apify_api_token'])
 # Initialize persistent storage on Apify to survive Render sleep cycles
 try:
     store = apify_client.key_value_stores().get_or_create(name='twitter-curation-bot-storage')
-    store_client = apify_client.key_value_store(store['id'])
+    store_client = apify_client.key_value_store(store.id)
 except Exception as e:
     print(f"Failed to connect to Apify KV Store: {e}")
     store_client = None
