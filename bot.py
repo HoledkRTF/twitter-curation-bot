@@ -3,7 +3,7 @@ import os
 import asyncio
 import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from apify_client import ApifyClient
 
 # Config from environment variables
@@ -250,6 +250,15 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     os.environ['TELEGRAM_CHANNEL_ID'] = channel_id
     print(f"Auto-detected Channel ID: {channel_id}")
 
+async def post_init(application: Application):
+    await application.bot.set_my_commands([
+        ("next", "Load the next item in the queue"),
+        ("scrape", "Force a manual scrape for more media"),
+        ("drip", "Auto-send media on a schedule (e.g. /drip 10)"),
+        ("stopdrip", "Stop auto-sending"),
+        ("channel", "Set your private channel ID"),
+    ])
+
 def main():
     try:
         loop = asyncio.get_event_loop()
@@ -257,7 +266,7 @@ def main():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
-    app = ApplicationBuilder().token(config['telegram_bot_token']).build()
+    app = ApplicationBuilder().token(config['telegram_bot_token']).post_init(post_init).build()
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("scrape", scrape_tweets))
