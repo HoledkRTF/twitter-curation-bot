@@ -221,7 +221,7 @@ async def upload_to_gofile(file_bytes, filename="video.mp4"):
         upload_res = await client.post(f"https://{server}.gofile.io/contents/uploadfile", files=files)
         return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.3.0"
+VERSION = "v1.3.1"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
@@ -256,9 +256,10 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text("Uploading full-res to Gofile (too large for Telegram)...")
             try:
                 gofile_link = await upload_to_gofile(highest_bytes)
-                caption += f"\n\n📥 [Download Full-Res (Gofile)]({gofile_link})"
+                caption += f"\n\n⚠️ *DOWNSCALED PREVIEW* (Original exceeds Telegram's 50MB limit)\n📥 [Download Full-Res (Gofile)]({gofile_link})"
             except Exception as e:
                 print(f"Gofile upload failed: {e}")
+                caption += f"\n\n⚠️ *DOWNSCALED PREVIEW* (Original exceeds Telegram's 50MB limit, Gofile upload failed)"
                 
             # Find a smaller variant for Telegram preview
             for u in urls_to_try[1:]:
