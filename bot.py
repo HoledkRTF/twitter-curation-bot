@@ -225,6 +225,9 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
         [
             InlineKeyboardButton("👍 Like (Save to Channel)", callback_data="like"),
             InlineKeyboardButton("👎 Skip", callback_data="skip")
+        ],
+        [
+            InlineKeyboardButton("⏸️ Pause", callback_data="pause")
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -347,6 +350,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     elif action == "skip":
         await query.message.delete()
+        
+    elif action == "pause":
+        # Put the item back at the front of the queue so it's not lost
+        tweet_queue.insert(0, current_item)
+        save_data(tweet_queue, history)
+        await query.message.delete()
+        
+        # Stop any active drip feeds
+        if context.job_queue:
+            current_jobs = context.job_queue.get_jobs_by_name(str(query.message.chat_id))
+            for job in current_jobs:
+                job.schedule_removal()
+                
+        await context.bot.send_message(chat_id=query.message.chat_id, text="⏸️ Paused! (Auto-drip has also been stopped). Type /next when you're ready to continue.")
+        return
 
     if context.job_queue:
         current_jobs = context.job_queue.get_jobs_by_name(str(query.message.chat_id))
