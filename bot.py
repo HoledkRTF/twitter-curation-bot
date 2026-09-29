@@ -355,7 +355,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Put the item back at the front of the queue so it's not lost
         tweet_queue.insert(0, current_item)
         save_data(tweet_queue, history)
-        await query.message.delete()
         
         # Stop any active drip feeds
         if context.job_queue:
@@ -363,7 +362,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for job in current_jobs:
                 job.schedule_removal()
                 
-        await context.bot.send_message(chat_id=query.message.chat_id, text="⏸️ Paused! (Auto-drip has also been stopped). Type /next when you're ready to continue.")
+        # Remove the pause button from this message to show it's paused
+        keyboard = [
+            [
+                InlineKeyboardButton("👍 Like (Save to Channel)", callback_data="like"),
+                InlineKeyboardButton("👎 Skip", callback_data="skip")
+            ]
+        ]
+        await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+                
+        await context.bot.send_message(chat_id=query.message.chat_id, text="⏸️ Paused! (Auto-drip stopped). The video above is saved—just Like/Skip it when you're ready to continue.")
         return
 
     if context.job_queue:
