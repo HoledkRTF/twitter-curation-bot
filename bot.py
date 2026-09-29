@@ -14,40 +14,47 @@ config = {
     'apify_api_token': os.environ.get('APIFY_API_TOKEN', ''),
 }
 
-QUEUE_FILE = 'queue.json'
-HISTORY_FILE = 'history.json'
 PORT = int(os.environ.get('PORT', 10000))
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL', '')
 
 apify_client = ApifyClient(config['apify_api_token'])
 
-if os.path.exists(QUEUE_FILE):
-    with open(QUEUE_FILE, 'r') as f:
-        tweet_queue = json.load(f)
-else:
+# Initialize persistent storage on Apify to survive Render sleep cycles
+try:
+    store = apify_client.key_value_stores().get_or_create(name='twitter-curation-bot-storage')
+    store_client = apify_client.key_value_store(store['id'])
+except Exception as e:
+    print(f"Failed to connect to Apify KV Store: {e}")
+    store_client = None
+
+def load_data():
     tweet_queue = []
-
-if os.path.exists(HISTORY_FILE):
-    with open(HISTORY_FILE, 'r') as f:
-        history = json.load(f)
-else:
     history = []
+    if store_client:
+        q_rec = store_client.get_record("queue")
+        if q_rec and q_rec.get('value'):
+            tweet_queue = q_rec['value']
+            
+        h_rec = store_client.get_record("history")
+        if h_rec and h_rec.get('value'):
+            history = h_rec['value']
+    return tweet_queue, history
 
-def save_queue():
-    with open(QUEUE_FILE, 'w') as f:
-        json.dump(tweet_queue, f)
+def save_data(tweet_queue, history):
+    if store_client:
+        store_client.set_record("queue", tweet_queue)
+        store_client.set_record("history", history)
 
-def save_history():
-    with open(HISTORY_FILE, 'w') as f:
-        json.dump(history, f)
+tweet_queue, history = load_data()
 
 async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    await context.bot.send_message(chat_id=chat_id, text="🔄 Auto-scraping Twitter List to refill queue... (This takes about 60 seconds)")
+    await context.bot.send_message(chat_id=chat_id, text="🔄 Auto-scraping Twitter List to refill queue... (Digging into history, this takes about 90 seconds)")
     
     try:
+        # Increase from 100 to 500 so it can dig deeper for new items
         run = apify_client.actor("apidojo/tweet-scraper").call(run_input={
             "startUrls": [{"url": config['twitter_list_url']}],
-            "tweetsDesired": 100,
+            "tweetsDesired": 500,
         })
         
         dataset_id = run.default_dataset_id if hasattr(run, 'default_dataset_id') else run['defaultDatasetId']
@@ -78,8 +85,7 @@ async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
                         history.append(media_obj['url'])
                         count += 1
                     
-        save_queue()
-        save_history()
+        save_data(tweet_queue, history)
         await context.bot.send_message(chat_id=chat_id, text=f"✅ Added {count} new items! Total in queue: {len(tweet_queue)}")
     except Exception as e:
         await context.bot.send_message(chat_id=chat_id, text=f"Error scraping: {e}")
@@ -99,7 +105,7 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
         await do_scrape(context, chat_id)
         if not tweet_queue:
-            await context.bot.send_message(chat_id=chat_id, text="Still empty! Try scraping again later.")
+            await context.bot.send_message(chat_id=chat_id, text="Still empty! Try scraping again later when the Twitter list has new posts.")
             return
 
     next_item = tweet_queue[0]
@@ -139,6 +145,10 @@ async def drip_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def start_drip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_message.chat_id
+    if not context.job_queue:
+        await update.message.reply_text("Error: JobQueue is not initialized on this server.")
+        return
+        
     try:
         minutes = float(context.args[0])
         if minutes < 1:
@@ -156,6 +166,9 @@ async def start_drip(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def stop_drip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_message.chat_id
+    if not context.job_queue:
+        return
+        
     current_jobs = context.job_queue.get_jobs_by_name(str(chat_id))
     if not current_jobs:
         await update.message.reply_text("No active drip feed.")
@@ -198,14 +211,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     current_item = tweet_queue.pop(0)
-    save_queue()
+    save_data(tweet_queue, history)
     
     if action == "like":
         channel_id = config.get('telegram_channel_id')
         if not channel_id:
             await query.message.reply_text("Error: You haven't set a Channel ID yet! Use /channel <id>")
             tweet_queue.insert(0, current_item)
-            save_queue()
+            save_data(tweet_queue, history)
             return
             
         try:
@@ -218,14 +231,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await query.message.reply_text(f"Failed to post to channel: {e}")
             tweet_queue.insert(0, current_item)
-            save_queue()
+            save_data(tweet_queue, history)
             return
             
     elif action == "skip":
         await query.message.delete()
 
-    current_jobs = context.job_queue.get_jobs_by_name(str(query.message.chat_id))
-    if not current_jobs:
+    if context.job_queue:
+        current_jobs = context.job_queue.get_jobs_by_name(str(query.message.chat_id))
+        if not current_jobs:
+            await send_next_tweet(query.message.chat_id, context)
+    else:
         await send_next_tweet(query.message.chat_id, context)
 
 async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
