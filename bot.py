@@ -212,6 +212,8 @@ async def fetch_media(url):
         response.raise_for_status()
         return response.content
 
+VERSION = "v1.1.0"
+
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
         await do_scrape(context, chat_id)
@@ -232,7 +234,7 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    caption = f"{next_item['text'][:800]}\n\n[Link to Tweet]({next_item['tweet_url']})"
+    caption = f"{next_item['text'][:800]}\n\n[Link to Tweet]({next_item['tweet_url']})\n\n`{VERSION}`"
     
     status_msg = await context.bot.send_message(chat_id=chat_id, text="Loading next item...")
     try:
