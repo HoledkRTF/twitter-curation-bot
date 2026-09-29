@@ -55,7 +55,9 @@ async def extract_media_from_twitter(url):
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'])
-        context = await browser.new_context()
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        )
         
         await context.add_cookies([
             {"name": "auth_token", "value": config['twitter_auth_token'], "domain": ".x.com", "path": "/"},
@@ -64,8 +66,16 @@ async def extract_media_from_twitter(url):
         
         page = await context.new_page()
         
+        graphql_hits = []
+        
         async def handle_response(response):
-            if "graphql" in response.url and ("ListLatestTweetsTimeline" in response.url or "ListLatest" in response.url):
+            url = response.url
+            # Log all graphql hits for debugging
+            if "graphql" in url:
+                endpoint = url.split("/")[-1].split("?")[0]
+                graphql_hits.append(endpoint)
+                
+            if "graphql" in url and ("ListLatestTweetsTimeline" in url or "ListLatest" in url):
                 try:
                     data = await response.json()
                     instructions = data.get('data', {}).get('list', {}).get('tweets_timeline', {}).get('timeline', {}).get('instructions', [])
@@ -102,17 +112,26 @@ async def extract_media_from_twitter(url):
                                             media_obj['type'] = 'photo'
                                             extracted_items.append(media_obj)
                 except Exception as e:
-                    pass
+                    print(f"Error parsing graphql response: {e}")
 
         page.on("response", handle_response)
         
+        print(f"Navigating to {url}...")
         await page.goto(url, timeout=90000, wait_until="domcontentloaded")
+        
+        title = await page.title()
+        current_url = page.url
+        print(f"Page title: {title}")
+        print(f"Current URL: {current_url}")
         
         # Wait for GraphQL responses to come in, then scroll for more
         await asyncio.sleep(5)
         for _ in range(5):
             await page.mouse.wheel(0, 5000)
             await asyncio.sleep(3)
+        
+        print(f"GraphQL endpoints hit: {graphql_hits}")
+        print(f"Extracted items: {len(extracted_items)}")
             
         await browser.close()
     return extracted_items
