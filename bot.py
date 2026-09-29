@@ -209,11 +209,19 @@ async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def fetch_media(url):
     async with httpx.AsyncClient() as client:
-        response = await client.get(url, timeout=30.0)
+        response = await client.get(url, timeout=60.0)
         response.raise_for_status()
         return response.content
 
-VERSION = "v1.2.0"
+async def upload_to_gofile(file_bytes, filename="video.mp4"):
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        res = await client.get("https://api.gofile.io/servers")
+        server = res.json()['data']['servers'][0]['name']
+        files = {'file': (filename, file_bytes)}
+        upload_res = await client.post(f"https://{server}.gofile.io/contents/uploadfile", files=files)
+        return upload_res.json()['data']['downloadPage']
+
+VERSION = "v1.3.0"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
@@ -240,20 +248,31 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await context.bot.send_message(chat_id=chat_id, text="Loading next item...")
     try:
         media_bytes = None
-        # Backwards compatibility: if 'urls' doesn't exist, just use the single 'url'
         urls_to_try = next_item.get('urls', [next_item['url']])
         
-        for u in urls_to_try:
+        highest_bytes = await fetch_media(urls_to_try[0])
+        
+        if len(highest_bytes) > 50_000_000:
+            await status_msg.edit_text("Uploading full-res to Gofile (too large for Telegram)...")
             try:
-                temp_bytes = await fetch_media(u)
-                if len(temp_bytes) <= 50_000_000:
-                    media_bytes = temp_bytes
-                    break # Found one that fits!
-            except Exception:
-                continue
+                gofile_link = await upload_to_gofile(highest_bytes)
+                caption += f"\n\n📥 [Download Full-Res (Gofile)]({gofile_link})"
+            except Exception as e:
+                print(f"Gofile upload failed: {e}")
+                
+            # Find a smaller variant for Telegram preview
+            for u in urls_to_try[1:]:
+                try:
+                    temp_bytes = await fetch_media(u)
+                    if len(temp_bytes) <= 50_000_000:
+                        media_bytes = temp_bytes
+                        break
+                except Exception:
+                    continue
+        else:
+            media_bytes = highest_bytes
                 
         if not media_bytes or len(media_bytes) > 50_000_000:
-            # If even the lowest quality variant is > 50MB, or if it failed to download
             fallback_msg = f"⚠️ *Video too large for Telegram natively (>50MB).* You'll have to view this one directly on X.\n\n{caption}"
             await context.bot.send_message(chat_id=chat_id, text=fallback_msg, reply_markup=reply_markup, parse_mode="Markdown")
             await status_msg.delete()
