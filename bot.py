@@ -243,8 +243,19 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
         if next_item['type'] == 'photo':
             await context.bot.send_photo(chat_id=chat_id, photo=media_bytes, caption=caption, reply_markup=reply_markup, parse_mode="Markdown")
         else:
-            await context.bot.send_video(chat_id=chat_id, video=media_bytes, caption=caption, reply_markup=reply_markup, parse_mode="Markdown")
-            
+            try:
+                if len(media_bytes) > 50_000_000:  # Telegram 50MB limit for bots
+                    fallback_msg = f"⚠️ *Video too large for Telegram natively (>50MB).* You'll have to view this one directly on X.\n\n{caption}"
+                    await context.bot.send_message(chat_id=chat_id, text=fallback_msg, reply_markup=reply_markup, parse_mode="Markdown")
+                else:
+                    await context.bot.send_video(chat_id=chat_id, video=media_bytes, caption=caption, reply_markup=reply_markup, parse_mode="Markdown")
+            except Exception as e:
+                if "Request Entity Too Large" in str(e) or "413" in str(e):
+                    fallback_msg = f"⚠️ *Video too large for Telegram natively (>50MB).* You'll have to view this one directly on X.\n\n{caption}"
+                    await context.bot.send_message(chat_id=chat_id, text=fallback_msg, reply_markup=reply_markup, parse_mode="Markdown")
+                else:
+                    raise e
+                    
         await status_msg.delete()
     except Exception as e:
         await status_msg.edit_text(f"Error downloading/sending media: {e}\nURL: {next_item['url']}", reply_markup=reply_markup)
