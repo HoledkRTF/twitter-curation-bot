@@ -106,11 +106,13 @@ async def extract_media_from_twitter(url):
 
         page.on("response", handle_response)
         
-        await page.goto(url)
+        await page.goto(url, timeout=90000, wait_until="domcontentloaded")
         
-        for _ in range(8):
+        # Wait for GraphQL responses to come in, then scroll for more
+        await asyncio.sleep(5)
+        for _ in range(5):
             await page.mouse.wheel(0, 5000)
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
             
         await browser.close()
     return extracted_items
