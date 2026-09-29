@@ -5,7 +5,7 @@ import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from apify_client import ApifyClient
-from playwright.async_api import async_playwright
+
 
 # Config from environment variables
 config = {
