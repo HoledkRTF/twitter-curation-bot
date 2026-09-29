@@ -33,6 +33,7 @@ except Exception as e:
 def load_data():
     tweet_queue = []
     history = []
+    unreviewed_count = 0
     if store_client:
         q_rec = store_client.get_record("queue")
         if q_rec and q_rec.get('value'):
@@ -41,14 +42,20 @@ def load_data():
         h_rec = store_client.get_record("history")
         if h_rec and h_rec.get('value'):
             history = h_rec['value']
-    return tweet_queue, history
+            
+        u_rec = store_client.get_record("unreviewed_count")
+        if u_rec and u_rec.get('value') is not None:
+            unreviewed_count = u_rec['value']
+            
+    return tweet_queue, history, unreviewed_count
 
-def save_data(tweet_queue, history):
+def save_data(tweet_queue, history, unreviewed_count):
     if store_client:
         store_client.set_record("queue", tweet_queue)
         store_client.set_record("history", history)
+        store_client.set_record("unreviewed_count", unreviewed_count)
 
-tweet_queue, history = load_data()
+tweet_queue, history, unreviewed_count = load_data()
 
 async def extract_media_from_twitter(list_id):
     extracted_items = []
@@ -192,7 +199,7 @@ async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
                 history.append(item['url'])
                 count += 1
                 
-        save_data(tweet_queue, history)
+        save_data(tweet_queue, history, unreviewed_count)
         await context.bot.send_message(chat_id=chat_id, text=f"✅ Scraped {len(items)} posts, found {count} brand new ones! Total in queue: {len(tweet_queue)}")
     except Exception as e:
         await context.bot.send_message(chat_id=chat_id, text=f"Error scraping: {e}")
@@ -203,8 +210,10 @@ async def scrape_tweets(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_next_tweet(update.message.chat_id, context)
 
 async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global unreviewed_count
     history.clear()
-    save_data(tweet_queue, history)
+    unreviewed_count = 0
+    save_data(tweet_queue, history, unreviewed_count)
     await update.message.reply_text("🗑️ History cleared! The scraper will now re-fetch older tweets as if they were brand new.")
 
 async def fetch_media(url):
@@ -221,7 +230,7 @@ async def upload_to_gofile(file_bytes, filename="video.mp4"):
         upload_res = await client.post(f"https://{server}.gofile.io/contents/uploadfile", files=files)
         return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.4.0"
+VERSION = "v1.5.0"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
@@ -230,8 +239,10 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=chat_id, text="Still empty! Try scraping again later when the Twitter list has new posts.")
             return
 
+    global unreviewed_count
+    
     next_item = tweet_queue.pop(0)
-    save_data(tweet_queue, history)
+    save_data(tweet_queue, history, unreviewed_count)
     
     keyboard = [
         [
@@ -276,6 +287,8 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
         if not media_bytes or len(media_bytes) > 50_000_000:
             fallback_msg = f"⚠️ *Video too large for Telegram natively (>50MB).* You'll have to view this one directly on X.\n\n{caption}"
             await context.bot.send_message(chat_id=chat_id, text=fallback_msg, reply_markup=reply_markup, parse_mode="Markdown")
+            unreviewed_count += 1
+            save_data(tweet_queue, history, unreviewed_count)
             await status_msg.delete()
             return
 
@@ -284,6 +297,8 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
         else:
             await context.bot.send_video(chat_id=chat_id, video=media_bytes, caption=caption, reply_markup=reply_markup, parse_mode="Markdown")
             
+        unreviewed_count += 1
+        save_data(tweet_queue, history, unreviewed_count)
         await status_msg.delete()
     except Exception as e:
         await status_msg.edit_text(f"Error downloading/sending media: {e}\nURL: {next_item['url']}", reply_markup=reply_markup)
@@ -357,6 +372,7 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_next_tweet(update.message.chat_id, context)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global unreviewed_count
     query = update.callback_query
     await query.answer()
     action = query.data
@@ -374,12 +390,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 message_id=query.message.message_id
             )
             await query.message.delete()
+            unreviewed_count = max(0, unreviewed_count - 1)
+            save_data(tweet_queue, history, unreviewed_count)
         except Exception as e:
             await query.message.reply_text(f"Failed to post to channel: {e}")
             return
             
     elif action == "skip":
         await query.message.delete()
+        unreviewed_count = max(0, unreviewed_count - 1)
+        save_data(tweet_queue, history, unreviewed_count)
         
     elif action == "pause":
         # Stop any active drip feeds
@@ -403,9 +423,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.job_queue:
         current_jobs = context.job_queue.get_jobs_by_name(str(query.message.chat_id))
         if not current_jobs:
-            await send_next_tweet(query.message.chat_id, context)
+            if unreviewed_count < 5:
+                await send_next_tweet(query.message.chat_id, context)
     else:
-        await send_next_tweet(query.message.chat_id, context)
+        if unreviewed_count < 5:
+            await send_next_tweet(query.message.chat_id, context)
 
 async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     channel_id = str(update.channel_post.chat.id)
