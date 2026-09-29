@@ -1,16 +1,17 @@
-FROM mcr.microsoft.com/playwright/python:v1.48.0-jammy
-
-# Switch to root to install dependencies if needed, though this image comes with mostly everything
-USER root
+FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install python dependencies
+# Install system dependencies for Playwright
+RUN apt-get update && apt-get install -y \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install the exact chromium version required by this playwright version
-RUN playwright install chromium
+# Install Chromium and all its OS dependencies
+RUN playwright install --with-deps chromium
 
 COPY . .
 
