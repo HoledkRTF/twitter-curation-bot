@@ -50,90 +50,125 @@ def save_data(tweet_queue, history):
 
 tweet_queue, history = load_data()
 
-async def extract_media_from_twitter(url):
+async def extract_media_from_twitter(list_id):
     extracted_items = []
     
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'])
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-        )
-        
-        await context.add_cookies([
-            {"name": "auth_token", "value": config['twitter_auth_token'], "domain": ".x.com", "path": "/"},
-            {"name": "ct0", "value": config['twitter_ct0'], "domain": ".x.com", "path": "/"}
-        ])
-        
-        page = await context.new_page()
-        
-        graphql_hits = []
-        
-        async def handle_response(response):
-            url = response.url
-            # Log all graphql hits for debugging
-            if "graphql" in url:
-                endpoint = url.split("/")[-1].split("?")[0]
-                graphql_hits.append(endpoint)
-                
-            if "graphql" in url and ("ListLatestTweetsTimeline" in url or "ListLatest" in url):
-                try:
-                    data = await response.json()
-                    instructions = data.get('data', {}).get('list', {}).get('tweets_timeline', {}).get('timeline', {}).get('instructions', [])
-                    for inst in instructions:
-                        if inst.get('type') == 'TimelineAddEntries':
-                            for entry in inst.get('entries', []):
-                                content = entry.get('content', {})
-                                if content.get('entryType') == 'TimelineTimelineItem':
-                                    result = content.get('itemContent', {}).get('tweet_results', {}).get('result', {})
-                                    tweet = result.get('legacy', {})
-                                    core = result.get('core', {}).get('user_results', {}).get('result', {}).get('legacy', {})
-                                    screen_name = core.get('screen_name', 'unknown')
-                                    tweet_id = tweet.get('id_str', '')
-                                    tweet_url = f"https://vxtwitter.com/{screen_name}/status/{tweet_id}"
-                                    tweet_text = tweet.get('full_text', '')
-                                    
-                                    if 'retweeted_status_result' in tweet:
-                                        tweet = tweet['retweeted_status_result']['result'].get('legacy', {})
-                                        
-                                    media = tweet.get('extended_entities', {}).get('media', [])
-                                    
-                                    for m in media:
-                                        media_obj = {'tweet_url': tweet_url, 'text': tweet_text}
-                                        if m.get('type') in ['video', 'animated_gif']:
-                                            variants = m.get('video_info', {}).get('variants', [])
-                                            mp4s = [v for v in variants if v.get('content_type') == 'video/mp4']
-                                            if mp4s:
-                                                best = max(mp4s, key=lambda x: x.get('bitrate', 0))
-                                                media_obj['url'] = best['url']
-                                                media_obj['type'] = 'video'
-                                                extracted_items.append(media_obj)
-                                        elif m.get('type') == 'photo':
-                                            media_obj['url'] = m['media_url_https']
-                                            media_obj['type'] = 'photo'
-                                            extracted_items.append(media_obj)
-                except Exception as e:
-                    print(f"Error parsing graphql response: {e}")
+    headers = {
+        "authorization": "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA",
+        "x-csrf-token": config['twitter_ct0'],
+        "x-twitter-active-user": "yes",
+        "x-twitter-auth-type": "OAuth2Session",
+        "x-twitter-client-language": "en",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    }
+    
+    cookies = {
+        "auth_token": config['twitter_auth_token'],
+        "ct0": config['twitter_ct0']
+    }
+    
+    # Known queryId for ListLatestTweetsTimeline
+    query_id = "1LE3u14FJjPZUHKFGzos2g"
+    url = f"https://x.com/i/api/graphql/{query_id}/ListLatestTweetsTimeline"
+    
+    variables = {"listId": list_id, "count": 100}
+    features = {
+        "responsive_web_graphql_exclude_directive_enabled": True,
+        "verified_phone_label_enabled": False,
+        "creator_subscriptions_tweet_preview_api_enabled": True,
+        "responsive_web_graphql_timeline_navigation_enabled": True,
+        "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
+        "c9s_tweet_anatomy_moderator_badge_enabled": True,
+        "tweetypie_unmention_optimization_enabled": True,
+        "responsive_web_edit_tweet_api_enabled": True,
+        "graphql_is_translatable_rweb_tweet_is_translatable_enabled": True,
+        "view_counts_everywhere_api_enabled": True,
+        "longform_notetweets_consumption_enabled": True,
+        "responsive_web_twitter_article_tweet_consumption_enabled": False,
+        "tweet_awards_web_tipping_enabled": False,
+        "freedom_of_speech_not_reach_fetch_enabled": True,
+        "standardized_nudges_misinfo": True,
+        "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": True,
+        "rweb_video_timestamps_enabled": True,
+        "longform_notetweets_rich_text_read_enabled": True,
+        "longform_notetweets_inline_media_enabled": True,
+        "responsive_web_media_download_video_enabled": False,
+        "responsive_web_enhance_cards_enabled": False
+    }
 
-        page.on("response", handle_response)
-        
-        print(f"Navigating to {url}...")
-        await page.goto(url, timeout=90000, wait_until="domcontentloaded")
-        
-        title = await page.title()
-        current_url = page.url
-        print(f"Page title: {title}")
-        print(f"Current URL: {current_url}")
-        
-        # Wait for GraphQL responses to come in, then scroll for more
-        await asyncio.sleep(5)
-        for _ in range(5):
-            await page.mouse.wheel(0, 5000)
-            await asyncio.sleep(3)
-        
-        print(f"GraphQL endpoints hit: {graphql_hits}")
-        print(f"Extracted items: {len(extracted_items)}")
+    cursor = None
+    
+    async with httpx.AsyncClient() as client:
+        # Loop through pages to gather enough media
+        for _ in range(10): # Fetch up to 10 pages
+            if cursor:
+                variables["cursor"] = cursor
             
-        await browser.close()
+            params = {
+                "variables": json.dumps(variables),
+                "features": json.dumps(features),
+            }
+            
+            try:
+                res = await client.get(url, headers=headers, cookies=cookies, params=params, timeout=30.0)
+                if res.status_code != 200:
+                    print(f"Twitter API Error: {res.status_code} - {res.text[:200]}")
+                    break
+                    
+                data = res.json()
+                instructions = data.get('data', {}).get('list', {}).get('tweets_timeline', {}).get('timeline', {}).get('instructions', [])
+                
+                new_cursor = None
+                for inst in instructions:
+                    if inst.get('type') == 'TimelineAddEntries':
+                        for entry in inst.get('entries', []):
+                            content = entry.get('content', {})
+                            
+                            # Extract Next Page Cursor
+                            if content.get('entryType') == 'TimelineTimelineCursor' and content.get('cursorType') == 'Bottom':
+                                new_cursor = content.get('value')
+                                
+                            # Extract Tweet Data
+                            if content.get('entryType') == 'TimelineTimelineItem':
+                                result = content.get('itemContent', {}).get('tweet_results', {}).get('result', {})
+                                tweet = result.get('legacy', {})
+                                core = result.get('core', {}).get('user_results', {}).get('result', {}).get('legacy', {})
+                                screen_name = core.get('screen_name', 'unknown')
+                                tweet_id = tweet.get('id_str', '')
+                                tweet_url = f"https://vxtwitter.com/{screen_name}/status/{tweet_id}"
+                                tweet_text = tweet.get('full_text', '')
+                                
+                                if 'retweeted_status_result' in tweet:
+                                    tweet = tweet['retweeted_status_result']['result'].get('legacy', {})
+                                    
+                                media = tweet.get('extended_entities', {}).get('media', [])
+                                
+                                for m in media:
+                                    media_obj = {'tweet_url': tweet_url, 'text': tweet_text}
+                                    if m.get('type') in ['video', 'animated_gif']:
+                                        variants = m.get('video_info', {}).get('variants', [])
+                                        mp4s = [v for v in variants if v.get('content_type') == 'video/mp4']
+                                        if mp4s:
+                                            best = max(mp4s, key=lambda x: x.get('bitrate', 0))
+                                            media_obj['url'] = best['url']
+                                            media_obj['type'] = 'video'
+                                            extracted_items.append(media_obj)
+                                    elif m.get('type') == 'photo':
+                                        media_obj['url'] = m['media_url_https']
+                                        media_obj['type'] = 'photo'
+                                        extracted_items.append(media_obj)
+                                        
+                # If we didn't get a new cursor, or we have 500+ items, stop paginating
+                if not new_cursor or len(extracted_items) >= 500:
+                    break
+                cursor = new_cursor
+                
+                # Small delay to avoid rate limits
+                await asyncio.sleep(1)
+            except Exception as e:
+                print(f"Error making GraphQL request: {e}")
+                break
+                
     return extracted_items
 
 async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
