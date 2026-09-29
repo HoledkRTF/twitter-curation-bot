@@ -230,7 +230,7 @@ async def upload_to_gofile(file_bytes, filename="video.mp4"):
         upload_res = await client.post(f"https://{server}.gofile.io/contents/uploadfile", files=files)
         return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.5.0"
+VERSION = "v1.5.1"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
@@ -246,7 +246,7 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = [
         [
-            InlineKeyboardButton("👍 Like (Save to Channel)", callback_data="like"),
+            InlineKeyboardButton("❤️ Love (Save to Channel)", callback_data="like"),
             InlineKeyboardButton("👎 Skip", callback_data="skip")
         ],
         [
@@ -411,13 +411,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Remove the pause button from this message to show it's paused
         keyboard = [
             [
-                InlineKeyboardButton("👍 Like (Save to Channel)", callback_data="like"),
+                InlineKeyboardButton("❤️ Love (Save to Channel)", callback_data="like"),
                 InlineKeyboardButton("👎 Skip", callback_data="skip")
             ]
         ]
         await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
                 
-        await context.bot.send_message(chat_id=query.message.chat_id, text="⏸️ Paused! (Auto-drip stopped). The video above is safely in your chat history—just Like/Skip it when you're ready to continue.")
+        await context.bot.send_message(chat_id=query.message.chat_id, text="⏸️ Paused! (Auto-drip stopped). The video above is safely in your chat history—just Love/Skip it when you're ready to continue.")
         return
 
     if context.job_queue:
