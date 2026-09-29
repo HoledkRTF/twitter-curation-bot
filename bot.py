@@ -149,8 +149,9 @@ async def extract_media_from_twitter(list_id):
                                         variants = m.get('video_info', {}).get('variants', [])
                                         mp4s = [v for v in variants if v.get('content_type') == 'video/mp4']
                                         if mp4s:
-                                            best = max(mp4s, key=lambda x: x.get('bitrate', 0))
-                                            media_obj['url'] = best['url']
+                                            sorted_mp4s = sorted(mp4s, key=lambda x: x.get('bitrate', 0), reverse=True)
+                                            media_obj['urls'] = [v['url'] for v in sorted_mp4s]
+                                            media_obj['url'] = sorted_mp4s[0]['url'] # Keep primary for backwards compatibility
                                             media_obj['type'] = 'video'
                                             extracted_items.append(media_obj)
                                     elif m.get('type') == 'photo':
@@ -212,7 +213,7 @@ async def fetch_media(url):
         response.raise_for_status()
         return response.content
 
-VERSION = "v1.1.0"
+VERSION = "v1.2.0"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
@@ -238,24 +239,31 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     
     status_msg = await context.bot.send_message(chat_id=chat_id, text="Loading next item...")
     try:
-        media_bytes = await fetch_media(next_item['url'])
+        media_bytes = None
+        # Backwards compatibility: if 'urls' doesn't exist, just use the single 'url'
+        urls_to_try = next_item.get('urls', [next_item['url']])
         
+        for u in urls_to_try:
+            try:
+                temp_bytes = await fetch_media(u)
+                if len(temp_bytes) <= 50_000_000:
+                    media_bytes = temp_bytes
+                    break # Found one that fits!
+            except Exception:
+                continue
+                
+        if not media_bytes or len(media_bytes) > 50_000_000:
+            # If even the lowest quality variant is > 50MB, or if it failed to download
+            fallback_msg = f"⚠️ *Video too large for Telegram natively (>50MB).* You'll have to view this one directly on X.\n\n{caption}"
+            await context.bot.send_message(chat_id=chat_id, text=fallback_msg, reply_markup=reply_markup, parse_mode="Markdown")
+            await status_msg.delete()
+            return
+
         if next_item['type'] == 'photo':
             await context.bot.send_photo(chat_id=chat_id, photo=media_bytes, caption=caption, reply_markup=reply_markup, parse_mode="Markdown")
         else:
-            try:
-                if len(media_bytes) > 50_000_000:  # Telegram 50MB limit for bots
-                    fallback_msg = f"⚠️ *Video too large for Telegram natively (>50MB).* You'll have to view this one directly on X.\n\n{caption}"
-                    await context.bot.send_message(chat_id=chat_id, text=fallback_msg, reply_markup=reply_markup, parse_mode="Markdown")
-                else:
-                    await context.bot.send_video(chat_id=chat_id, video=media_bytes, caption=caption, reply_markup=reply_markup, parse_mode="Markdown")
-            except Exception as e:
-                if "Request Entity Too Large" in str(e) or "413" in str(e):
-                    fallback_msg = f"⚠️ *Video too large for Telegram natively (>50MB).* You'll have to view this one directly on X.\n\n{caption}"
-                    await context.bot.send_message(chat_id=chat_id, text=fallback_msg, reply_markup=reply_markup, parse_mode="Markdown")
-                else:
-                    raise e
-                    
+            await context.bot.send_video(chat_id=chat_id, video=media_bytes, caption=caption, reply_markup=reply_markup, parse_mode="Markdown")
+            
         await status_msg.delete()
     except Exception as e:
         await status_msg.edit_text(f"Error downloading/sending media: {e}\nURL: {next_item['url']}", reply_markup=reply_markup)
