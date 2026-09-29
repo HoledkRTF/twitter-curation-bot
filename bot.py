@@ -221,7 +221,7 @@ async def upload_to_gofile(file_bytes, filename="video.mp4"):
         upload_res = await client.post(f"https://{server}.gofile.io/contents/uploadfile", files=files)
         return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.3.1"
+VERSION = "v1.4.0"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
@@ -230,7 +230,8 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=chat_id, text="Still empty! Try scraping again later when the Twitter list has new posts.")
             return
 
-    next_item = tweet_queue[0]
+    next_item = tweet_queue.pop(0)
+    save_data(tweet_queue, history)
     
     keyboard = [
         [
@@ -261,7 +262,6 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
                 print(f"Gofile upload failed: {e}")
                 caption += f"\n\n⚠️ *DOWNSCALED PREVIEW* (Original exceeds Telegram's 50MB limit, Gofile upload failed)"
                 
-            # Find a smaller variant for Telegram preview
             for u in urls_to_try[1:]:
                 try:
                     temp_bytes = await fetch_media(u)
@@ -361,19 +361,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     action = query.data
     
-    if not tweet_queue:
-        await query.message.reply_text("Queue is empty.")
-        return
-        
-    current_item = tweet_queue.pop(0)
-    save_data(tweet_queue, history)
-    
     if action == "like":
         channel_id = config.get('telegram_channel_id')
         if not channel_id:
             await query.message.reply_text("Error: You haven't set a Channel ID yet! Use /channel <id>")
-            tweet_queue.insert(0, current_item)
-            save_data(tweet_queue, history)
             return
             
         try:
@@ -385,18 +376,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.delete()
         except Exception as e:
             await query.message.reply_text(f"Failed to post to channel: {e}")
-            tweet_queue.insert(0, current_item)
-            save_data(tweet_queue, history)
             return
             
     elif action == "skip":
         await query.message.delete()
         
     elif action == "pause":
-        # Put the item back at the front of the queue so it's not lost
-        tweet_queue.insert(0, current_item)
-        save_data(tweet_queue, history)
-        
         # Stop any active drip feeds
         if context.job_queue:
             current_jobs = context.job_queue.get_jobs_by_name(str(query.message.chat_id))
@@ -412,7 +397,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
                 
-        await context.bot.send_message(chat_id=query.message.chat_id, text="⏸️ Paused! (Auto-drip stopped). The video above is saved—just Like/Skip it when you're ready to continue.")
+        await context.bot.send_message(chat_id=query.message.chat_id, text="⏸️ Paused! (Auto-drip stopped). The video above is safely in your chat history—just Like/Skip it when you're ready to continue.")
         return
 
     if context.job_queue:
