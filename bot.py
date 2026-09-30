@@ -147,7 +147,7 @@ async def extract_media_from_twitter(list_id):
                                 tweet_text = tweet.get('full_text', '')
                                 
                                 if 'retweeted_status_result' in tweet:
-                                    tweet = tweet['retweeted_status_result']['result'].get('legacy', {})
+                                    continue # Skip all retweets, only pull original list content
                                     
                                 media = tweet.get('extended_entities', {}).get('media', [])
                                 
@@ -236,7 +236,7 @@ async def upload_to_gofile(file_bytes, filename="video.mp4"):
         upload_res = await client.post(f"https://{server}.gofile.io/contents/uploadfile", files=files)
         return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.6.4"
+VERSION = "v1.6.5"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
