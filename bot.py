@@ -231,7 +231,7 @@ async def upload_to_gofile(file_bytes, filename="video.mp4"):
         upload_res = await client.post(f"https://{server}.gofile.io/contents/uploadfile", files=files)
         return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.6.2"
+VERSION = "v1.6.3"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
@@ -287,7 +287,7 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
             media_bytes = highest_bytes
                 
         if not media_bytes or len(media_bytes) > 50_000_000:
-            fallback_msg = f"⚠️ <b>Video too large for Telegram natively (>50MB).</b> You'll have to view this one directly on X.\n\n{caption}"
+            fallback_msg = f"⚠️ <b>Video too large for Telegram natively (>50MB).</b>\n🔗 <a href='{next_item['url']}'>Direct Media Link</a>\n\n{caption}"
             await context.bot.send_message(chat_id=chat_id, text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
             unreviewed_count += 1
             save_data(tweet_queue, history, unreviewed_count)
@@ -304,7 +304,7 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.delete()
     except Exception as e:
         print(f"Error downloading/sending media: {e}")
-        fallback_msg = f"⚠️ <b>Media download failed (Timeout/Error).</b> You can view it directly on X.\n\n{caption}"
+        fallback_msg = f"⚠️ <b>Media download failed (Timeout/Error).</b>\n🔗 <a href='{next_item['url']}'>Direct Media Link</a>\n\n{caption}"
         await status_msg.edit_text(text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
         unreviewed_count += 1
         save_data(tweet_queue, history, unreviewed_count)
