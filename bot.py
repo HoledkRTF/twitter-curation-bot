@@ -1,5 +1,6 @@
 import json
 import os
+import html
 import asyncio
 import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -230,7 +231,7 @@ async def upload_to_gofile(file_bytes, filename="video.mp4"):
         upload_res = await client.post(f"https://{server}.gofile.io/contents/uploadfile", files=files)
         return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.5.1"
+VERSION = "v1.5.2"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
@@ -255,7 +256,8 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    caption = f"{next_item['text'][:800]}\n\n[Link to Tweet]({next_item['tweet_url']})\n\n`{VERSION}`"
+    safe_text = html.escape(next_item['text'][:800])
+    caption = f"{safe_text}\n\n<a href='{next_item['tweet_url']}'>Link to Tweet</a>\n\n<code>{VERSION}</code>"
     
     status_msg = await context.bot.send_message(chat_id=chat_id, text="Loading next item...")
     try:
@@ -268,10 +270,10 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text("Uploading full-res to Gofile (too large for Telegram)...")
             try:
                 gofile_link = await upload_to_gofile(highest_bytes)
-                caption += f"\n\n⚠️ *DOWNSCALED PREVIEW* (Original exceeds Telegram's 50MB limit)\n📥 [Download Full-Res (Gofile)]({gofile_link})"
+                caption += f"\n\n⚠️ <b>DOWNSCALED PREVIEW</b> (Original exceeds Telegram's 50MB limit)\n📥 <a href='{gofile_link}'>Download Full-Res (Gofile)</a>"
             except Exception as e:
                 print(f"Gofile upload failed: {e}")
-                caption += f"\n\n⚠️ *DOWNSCALED PREVIEW* (Original exceeds Telegram's 50MB limit, Gofile upload failed)"
+                caption += f"\n\n⚠️ <b>DOWNSCALED PREVIEW</b> (Original exceeds Telegram's 50MB limit, Gofile upload failed)"
                 
             for u in urls_to_try[1:]:
                 try:
@@ -285,17 +287,17 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
             media_bytes = highest_bytes
                 
         if not media_bytes or len(media_bytes) > 50_000_000:
-            fallback_msg = f"⚠️ *Video too large for Telegram natively (>50MB).* You'll have to view this one directly on X.\n\n{caption}"
-            await context.bot.send_message(chat_id=chat_id, text=fallback_msg, reply_markup=reply_markup, parse_mode="Markdown")
+            fallback_msg = f"⚠️ <b>Video too large for Telegram natively (>50MB).</b> You'll have to view this one directly on X.\n\n{caption}"
+            await context.bot.send_message(chat_id=chat_id, text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
             unreviewed_count += 1
             save_data(tweet_queue, history, unreviewed_count)
             await status_msg.delete()
             return
 
         if next_item['type'] == 'photo':
-            await context.bot.send_photo(chat_id=chat_id, photo=media_bytes, caption=caption, reply_markup=reply_markup, parse_mode="Markdown")
+            await context.bot.send_photo(chat_id=chat_id, photo=media_bytes, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
         else:
-            await context.bot.send_video(chat_id=chat_id, video=media_bytes, caption=caption, reply_markup=reply_markup, parse_mode="Markdown")
+            await context.bot.send_video(chat_id=chat_id, video=media_bytes, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
             
         unreviewed_count += 1
         save_data(tweet_queue, history, unreviewed_count)
