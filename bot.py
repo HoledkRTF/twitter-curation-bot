@@ -219,7 +219,7 @@ async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def fetch_media(url):
     async with httpx.AsyncClient() as client:
-        response = await client.get(url, timeout=60.0)
+        response = await client.get(url, timeout=180.0)
         response.raise_for_status()
         return response.content
 
@@ -231,7 +231,7 @@ async def upload_to_gofile(file_bytes, filename="video.mp4"):
         upload_res = await client.post(f"https://{server}.gofile.io/contents/uploadfile", files=files)
         return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.6.1"
+VERSION = "v1.6.2"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
@@ -303,7 +303,11 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
         save_data(tweet_queue, history, unreviewed_count)
         await status_msg.delete()
     except Exception as e:
-        await status_msg.edit_text(f"Error downloading/sending media: {e}\nURL: {next_item['url']}", reply_markup=reply_markup)
+        print(f"Error downloading/sending media: {e}")
+        fallback_msg = f"⚠️ <b>Media download failed (Timeout/Error).</b> You can view it directly on X.\n\n{caption}"
+        await status_msg.edit_text(text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
+        unreviewed_count += 1
+        save_data(tweet_queue, history, unreviewed_count)
 
 async def drip_job(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
