@@ -181,6 +181,7 @@ async def extract_media_from_twitter(list_id):
     return extracted_items
 
 async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    global tweet_queue, history, unreviewed_count
     await context.bot.send_message(chat_id=chat_id, text="🔄 Scraping Twitter list...")
     
     try:
@@ -194,12 +195,16 @@ async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
         items = await extract_media_from_twitter(list_id)
         
         count = 0
+        added_items = []
         for item in items:
             if item['url'] not in history and not any(q.get('url') == item['url'] for q in tweet_queue):
-                tweet_queue.append(item)
+                added_items.append(item)
                 history.append(item['url'])
                 count += 1
                 
+        # Prepend new items so the freshest media is served first
+        tweet_queue = added_items + tweet_queue
+        
         save_data(tweet_queue, history, unreviewed_count)
         await context.bot.send_message(chat_id=chat_id, text=f"✅ Scraped {len(items)} posts, found {count} brand new ones! Total in queue: {len(tweet_queue)}")
     except Exception as e:
@@ -231,7 +236,7 @@ async def upload_to_gofile(file_bytes, filename="video.mp4"):
         upload_res = await client.post(f"https://{server}.gofile.io/contents/uploadfile", files=files)
         return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.6.3"
+VERSION = "v1.6.4"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
