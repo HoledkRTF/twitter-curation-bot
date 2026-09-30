@@ -231,7 +231,7 @@ async def upload_to_gofile(file_bytes, filename="video.mp4"):
         upload_res = await client.post(f"https://{server}.gofile.io/contents/uploadfile", files=files)
         return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.6.0"
+VERSION = "v1.6.1"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
@@ -373,6 +373,9 @@ async def set_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_next_tweet(update.message.chat_id, context)
 
+async def version_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(VERSION)
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global unreviewed_count
     query = update.callback_query
@@ -446,6 +449,7 @@ async def post_init(application: Application):
         ("stopdrip", "Stop auto-sending"),
         ("clearhistory", "Wipe the scraper's memory so you can see old tweets again"),
         ("channel", "Set your private channel ID"),
+        ("v", "Check current bot version"),
     ])
 
 def main():
@@ -461,6 +465,7 @@ def main():
     app.add_handler(CommandHandler("scrape", scrape_tweets))
     app.add_handler(CommandHandler("clearhistory", clear_history))
     app.add_handler(CommandHandler("next", next_command))
+    app.add_handler(CommandHandler("v", version_command))
     app.add_handler(CommandHandler("channel", set_channel))
     app.add_handler(CommandHandler("drip", start_drip))
     app.add_handler(CommandHandler("stopdrip", stop_drip))
