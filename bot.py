@@ -231,7 +231,7 @@ async def upload_to_gofile(file_bytes, filename="video.mp4"):
         upload_res = await client.post(f"https://{server}.gofile.io/contents/uploadfile", files=files)
         return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.5.2"
+VERSION = "v1.6.0"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
@@ -422,14 +422,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=query.message.chat_id, text="⏸️ Paused! (Auto-drip stopped). The video above is safely in your chat history—just Love/Skip it when you're ready to continue.")
         return
 
-    if context.job_queue:
-        current_jobs = context.job_queue.get_jobs_by_name(str(query.message.chat_id))
-        if not current_jobs:
-            if unreviewed_count < 5:
-                await send_next_tweet(query.message.chat_id, context)
-    else:
-        if unreviewed_count < 5:
-            await send_next_tweet(query.message.chat_id, context)
+    # Fire replacement as background task so this handler returns instantly
+    should_replace = unreviewed_count < 5
+    if should_replace:
+        if context.job_queue:
+            current_jobs = context.job_queue.get_jobs_by_name(str(query.message.chat_id))
+            if current_jobs:
+                should_replace = False
+    if should_replace:
+        asyncio.ensure_future(send_next_tweet(query.message.chat_id, context))
 
 async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     channel_id = str(update.channel_post.chat.id)
