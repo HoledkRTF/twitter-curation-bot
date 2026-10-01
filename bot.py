@@ -120,7 +120,10 @@ async def extract_media_from_twitter(list_id):
             try:
                 res = await client.get(url, headers=headers, cookies=cookies, params=params, timeout=30.0)
                 if res.status_code != 200:
-                    print(f"Twitter API Error: {res.status_code} - {res.text[:200]}")
+                    err_text = res.text[:200]
+                    print(f"Twitter API Error: {res.status_code} - {err_text}")
+                    if res.status_code in [401, 403] or "auth" in err_text.lower():
+                        raise Exception("⚠️ Twitter cookies (auth_token or ct0) are invalid or have expired! Please update them in Render.")
                     break
                     
                 data = res.json()
@@ -162,11 +165,7 @@ async def extract_media_from_twitter(list_id):
                                             media_obj['url'] = sorted_mp4s[0]['url'] # Keep primary for backwards compatibility
                                             media_obj['type'] = 'video'
                                             extracted_items.append(media_obj)
-                                    elif m.get('type') == 'photo':
-                                        media_obj['url'] = m['media_url_https']
-                                        media_obj['type'] = 'photo'
-                                        extracted_items.append(media_obj)
-                                        
+                                            
                 # If we didn't get a new cursor, or we have 500+ items, stop paginating
                 if not new_cursor or len(extracted_items) >= 500:
                     break
@@ -176,6 +175,8 @@ async def extract_media_from_twitter(list_id):
                 await asyncio.sleep(1)
             except Exception as e:
                 print(f"Error making GraphQL request: {e}")
+                if "cookies" in str(e).lower() or "expired" in str(e).lower():
+                    raise e
                 break
                 
     return extracted_items
@@ -208,7 +209,10 @@ async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
         save_data(tweet_queue, history, unreviewed_count)
         await context.bot.send_message(chat_id=chat_id, text=f"✅ Scraped {len(items)} posts, found {count} brand new ones! Total in queue: {len(tweet_queue)}")
     except Exception as e:
-        await context.bot.send_message(chat_id=chat_id, text=f"Error scraping: {e}")
+        if "cookies" in str(e).lower() or "expired" in str(e).lower():
+            await context.bot.send_message(chat_id=chat_id, text=f"{e}")
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=f"❌ Error scraping: {e}")
 
 async def scrape_tweets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await do_scrape(context, update.message.chat_id)
@@ -236,7 +240,7 @@ async def upload_to_gofile(file_bytes, filename="video.mp4"):
         upload_res = await client.post(f"https://{server}.gofile.io/contents/uploadfile", files=files)
         return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.6.5"
+VERSION = "v1.7.0"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
@@ -385,6 +389,29 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def version_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(VERSION)
 
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global tweet_queue, unreviewed_count
+    msg = f"📊 *Bot Status*\n\n"
+    msg += f"📦 Queue: {len(tweet_queue)} items\n"
+    msg += f"👀 Unreviewed Buffer: {unreviewed_count}\n"
+    msg += f"🤖 Version: {VERSION}"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def set_counter_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global unreviewed_count, tweet_queue, history
+    if not context.args:
+        await update.message.reply_text("Usage: /setcounter <number>\nExample: /setcounter 5")
+        return
+    try:
+        new_count = int(context.args[0])
+        if new_count < 0:
+            new_count = 0
+        unreviewed_count = new_count
+        save_data(tweet_queue, history, unreviewed_count)
+        await update.message.reply_text(f"✅ Unreviewed counter manually set to {unreviewed_count}.")
+    except ValueError:
+        await update.message.reply_text("❌ Please provide a valid number.")
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global unreviewed_count
     query = update.callback_query
@@ -458,6 +485,8 @@ async def post_init(application: Application):
         ("stopdrip", "Stop auto-sending"),
         ("clearhistory", "Wipe the scraper's memory so you can see old tweets again"),
         ("channel", "Set your private channel ID"),
+        ("status", "Check queue length and unreviewed counter"),
+        ("setcounter", "Manually fix counter drift (e.g. /setcounter 5)"),
         ("v", "Check current bot version"),
     ])
 
@@ -475,6 +504,8 @@ def main():
     app.add_handler(CommandHandler("clearhistory", clear_history))
     app.add_handler(CommandHandler("next", next_command))
     app.add_handler(CommandHandler("v", version_command))
+    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("setcounter", set_counter_command))
     app.add_handler(CommandHandler("channel", set_channel))
     app.add_handler(CommandHandler("drip", start_drip))
     app.add_handler(CommandHandler("stopdrip", stop_drip))
