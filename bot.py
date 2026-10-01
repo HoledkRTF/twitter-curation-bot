@@ -35,6 +35,7 @@ def load_data():
     tweet_queue = []
     history = []
     unreviewed_count = 0
+    media_filter = "all"
     if store_client:
         q_rec = store_client.get_record("queue")
         if q_rec and q_rec.get('value'):
@@ -48,15 +49,20 @@ def load_data():
         if u_rec and u_rec.get('value') is not None:
             unreviewed_count = u_rec['value']
             
-    return tweet_queue, history, unreviewed_count
+        f_rec = store_client.get_record("media_filter")
+        if f_rec and f_rec.get('value'):
+            media_filter = f_rec['value']
+            
+    return tweet_queue, history, unreviewed_count, media_filter
 
-def save_data(tweet_queue, history, unreviewed_count):
+def save_data(tweet_queue, history, unreviewed_count, media_filter):
     if store_client:
         store_client.set_record("queue", tweet_queue)
         store_client.set_record("history", history)
         store_client.set_record("unreviewed_count", unreviewed_count)
+        store_client.set_record("media_filter", media_filter)
 
-tweet_queue, history, unreviewed_count = load_data()
+tweet_queue, history, unreviewed_count, media_filter = load_data()
 
 async def extract_media_from_twitter(list_id):
     extracted_items = []
@@ -165,6 +171,10 @@ async def extract_media_from_twitter(list_id):
                                             media_obj['url'] = sorted_mp4s[0]['url'] # Keep primary for backwards compatibility
                                             media_obj['type'] = 'video'
                                             extracted_items.append(media_obj)
+                                    elif m.get('type') == 'photo':
+                                        media_obj['url'] = m['media_url_https']
+                                        media_obj['type'] = 'photo'
+                                        extracted_items.append(media_obj)
                                             
                 # If we didn't get a new cursor, or we have 500+ items, stop paginating
                 if not new_cursor or len(extracted_items) >= 500:
@@ -206,7 +216,7 @@ async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
         # Prepend new items so the freshest media is served first
         tweet_queue = added_items + tweet_queue
         
-        save_data(tweet_queue, history, unreviewed_count)
+        save_data(tweet_queue, history, unreviewed_count, media_filter)
         await context.bot.send_message(chat_id=chat_id, text=f"✅ Scraped {len(items)} posts, found {count} brand new ones! Total in queue: {len(tweet_queue)}")
     except Exception as e:
         if "cookies" in str(e).lower() or "expired" in str(e).lower():
@@ -223,7 +233,7 @@ async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global unreviewed_count
     history.clear()
     unreviewed_count = 0
-    save_data(tweet_queue, history, unreviewed_count)
+    save_data(tweet_queue, history, unreviewed_count, media_filter)
     await update.message.reply_text("🗑️ History cleared! The scraper will now re-fetch older tweets as if they were brand new.")
 
 async def fetch_media(url):
@@ -240,7 +250,7 @@ async def upload_to_gofile(file_bytes, filename="video.mp4"):
         upload_res = await client.post(f"https://{server}.gofile.io/contents/uploadfile", files=files)
         return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.7.0"
+VERSION = "v1.8.0"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
@@ -251,8 +261,25 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
 
     global unreviewed_count
     
-    next_item = tweet_queue.pop(0)
-    save_data(tweet_queue, history, unreviewed_count)
+    match_index = -1
+    for i, item in enumerate(tweet_queue):
+        if media_filter == "all":
+            match_index = i
+            break
+        elif media_filter == "video" and item.get('type') == 'video':
+            match_index = i
+            break
+        elif media_filter == "photo" and item.get('type') == 'photo':
+            match_index = i
+            break
+            
+    if match_index == -1:
+        f_type = "videos" if media_filter == "video" else "photos"
+        await context.bot.send_message(chat_id=chat_id, text=f"No {f_type} left in the queue! They might have been filtered out. Try changing the filter with /fa or run /scrape.")
+        return
+
+    next_item = tweet_queue.pop(match_index)
+    save_data(tweet_queue, history, unreviewed_count, media_filter)
     
     keyboard = [
         [
@@ -299,7 +326,7 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
             fallback_msg = f"⚠️ <b>Video too large for Telegram natively (>50MB).</b>\n🔗 <a href='{next_item['url']}'>Direct Media Link</a>\n\n{caption}"
             await context.bot.send_message(chat_id=chat_id, text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
             unreviewed_count += 1
-            save_data(tweet_queue, history, unreviewed_count)
+            save_data(tweet_queue, history, unreviewed_count, media_filter)
             await status_msg.delete()
             return
 
@@ -309,14 +336,14 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_video(chat_id=chat_id, video=media_bytes, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
             
         unreviewed_count += 1
-        save_data(tweet_queue, history, unreviewed_count)
+        save_data(tweet_queue, history, unreviewed_count, media_filter)
         await status_msg.delete()
     except Exception as e:
         print(f"Error downloading/sending media: {e}")
         fallback_msg = f"⚠️ <b>Media download failed (Timeout/Error).</b>\n🔗 <a href='{next_item['url']}'>Direct Media Link</a>\n\n{caption}"
         await status_msg.edit_text(text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
         unreviewed_count += 1
-        save_data(tweet_queue, history, unreviewed_count)
+        save_data(tweet_queue, history, unreviewed_count, media_filter)
 
 async def drip_job(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
@@ -390,10 +417,11 @@ async def version_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(VERSION)
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global tweet_queue, unreviewed_count
+    global tweet_queue, unreviewed_count, media_filter
     msg = f"📊 *Bot Status*\n\n"
     msg += f"📦 Queue: {len(tweet_queue)} items\n"
     msg += f"👀 Unreviewed Buffer: {unreviewed_count}\n"
+    msg += f"🎛️ Active Filter: {media_filter}\n"
     msg += f"🤖 Version: {VERSION}"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -407,10 +435,28 @@ async def set_counter_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         if new_count < 0:
             new_count = 0
         unreviewed_count = new_count
-        save_data(tweet_queue, history, unreviewed_count)
+        save_data(tweet_queue, history, unreviewed_count, media_filter)
         await update.message.reply_text(f"✅ Unreviewed counter manually set to {unreviewed_count}.")
     except ValueError:
         await update.message.reply_text("❌ Please provide a valid number.")
+
+async def filter_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global media_filter, tweet_queue, history, unreviewed_count
+    media_filter = "photo"
+    save_data(tweet_queue, history, unreviewed_count, media_filter)
+    await update.message.reply_text("🖼️ Filter set: Photos only")
+
+async def filter_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global media_filter, tweet_queue, history, unreviewed_count
+    media_filter = "video"
+    save_data(tweet_queue, history, unreviewed_count, media_filter)
+    await update.message.reply_text("🎬 Filter set: Videos only")
+
+async def filter_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global media_filter, tweet_queue, history, unreviewed_count
+    media_filter = "all"
+    save_data(tweet_queue, history, unreviewed_count, media_filter)
+    await update.message.reply_text("📦 Filter set: All media")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global unreviewed_count
@@ -432,7 +478,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await query.message.delete()
             unreviewed_count = max(0, unreviewed_count - 1)
-            save_data(tweet_queue, history, unreviewed_count)
+            save_data(tweet_queue, history, unreviewed_count, media_filter)
         except Exception as e:
             await query.message.reply_text(f"Failed to post to channel: {e}")
             return
@@ -487,6 +533,9 @@ async def post_init(application: Application):
         ("channel", "Set your private channel ID"),
         ("status", "Check queue length and unreviewed counter"),
         ("setcounter", "Manually fix counter drift (e.g. /setcounter 5)"),
+        ("fv", "Filter: Videos only"),
+        ("fp", "Filter: Photos only"),
+        ("fa", "Filter: All media"),
         ("v", "Check current bot version"),
     ])
 
@@ -506,6 +555,9 @@ def main():
     app.add_handler(CommandHandler("v", version_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("setcounter", set_counter_command))
+    app.add_handler(CommandHandler("fv", filter_video))
+    app.add_handler(CommandHandler("fp", filter_photo))
+    app.add_handler(CommandHandler("fa", filter_all))
     app.add_handler(CommandHandler("channel", set_channel))
     app.add_handler(CommandHandler("drip", start_drip))
     app.add_handler(CommandHandler("stopdrip", stop_drip))
