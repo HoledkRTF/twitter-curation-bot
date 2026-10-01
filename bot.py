@@ -250,14 +250,14 @@ async def upload_to_gofile(file_bytes, filename="video.mp4"):
         upload_res = await client.post(f"https://{server}.gofile.io/contents/uploadfile", files=files)
         return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.8.0"
+VERSION = "v1.8.1"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
         await do_scrape(context, chat_id)
         if not tweet_queue:
             await context.bot.send_message(chat_id=chat_id, text="Still empty! Try scraping again later when the Twitter list has new posts.")
-            return
+            return False
 
     global unreviewed_count
     
@@ -276,7 +276,7 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if match_index == -1:
         f_type = "videos" if media_filter == "video" else "photos"
         await context.bot.send_message(chat_id=chat_id, text=f"No {f_type} left in the queue! They might have been filtered out. Try changing the filter with /fa or run /scrape.")
-        return
+        return False
 
     next_item = tweet_queue.pop(match_index)
     save_data(tweet_queue, history, unreviewed_count, media_filter)
@@ -328,7 +328,7 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
             unreviewed_count += 1
             save_data(tweet_queue, history, unreviewed_count, media_filter)
             await status_msg.delete()
-            return
+            return True
 
         if next_item['type'] == 'photo':
             await context.bot.send_photo(chat_id=chat_id, photo=media_bytes, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
@@ -338,12 +338,14 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
         unreviewed_count += 1
         save_data(tweet_queue, history, unreviewed_count, media_filter)
         await status_msg.delete()
+        return True
     except Exception as e:
         print(f"Error downloading/sending media: {e}")
         fallback_msg = f"⚠️ <b>Media download failed (Timeout/Error).</b>\n🔗 <a href='{next_item['url']}'>Direct Media Link</a>\n\n{caption}"
         await status_msg.edit_text(text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
         unreviewed_count += 1
         save_data(tweet_queue, history, unreviewed_count, media_filter)
+        return True
 
 async def drip_job(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
@@ -410,8 +412,29 @@ async def set_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     os.environ['TELEGRAM_CHANNEL_ID'] = context.args[0]
     await update.message.reply_text(f"Channel ID saved as {config['telegram_channel_id']}")
 
+is_filling = False
+
+async def fill_buffer(chat_id, context: ContextTypes.DEFAULT_TYPE):
+    global unreviewed_count, is_filling
+    
+    # Don't auto-fill if a drip feed is actively running for this chat
+    if context.job_queue:
+        if context.job_queue.get_jobs_by_name(str(chat_id)):
+            return
+            
+    if is_filling:
+        return
+    is_filling = True
+    try:
+        while unreviewed_count < 5 and tweet_queue:
+            success = await send_next_tweet(chat_id, context)
+            if not success:
+                break
+    finally:
+        is_filling = False
+
 async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_next_tweet(update.message.chat_id, context)
+    asyncio.ensure_future(fill_buffer(update.message.chat_id, context))
 
 async def version_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(VERSION)
@@ -486,7 +509,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "skip":
         await query.message.delete()
         unreviewed_count = max(0, unreviewed_count - 1)
-        save_data(tweet_queue, history, unreviewed_count)
+        save_data(tweet_queue, history, unreviewed_count, media_filter)
         
     elif action == "pause":
         # Stop any active drip feeds
@@ -507,15 +530,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=query.message.chat_id, text="⏸️ Paused! (Auto-drip stopped). The video above is safely in your chat history—just Love/Skip it when you're ready to continue.")
         return
 
-    # Fire replacement as background task so this handler returns instantly
-    should_replace = unreviewed_count < 5
-    if should_replace:
-        if context.job_queue:
-            current_jobs = context.job_queue.get_jobs_by_name(str(query.message.chat_id))
-            if current_jobs:
-                should_replace = False
-    if should_replace:
-        asyncio.ensure_future(send_next_tweet(query.message.chat_id, context))
+    # Automatically fill the buffer back up to 5 as a background task
+    asyncio.ensure_future(fill_buffer(query.message.chat_id, context))
 
 async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     channel_id = str(update.channel_post.chat.id)
@@ -546,7 +562,7 @@ def main():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
-    app = ApplicationBuilder().token(config['telegram_bot_token']).post_init(post_init).build()
+    app = ApplicationBuilder().token(config['telegram_bot_token']).read_timeout(60.0).write_timeout(60.0).connect_timeout(60.0).pool_timeout(60.0).post_init(post_init).build()
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("scrape", scrape_tweets))
