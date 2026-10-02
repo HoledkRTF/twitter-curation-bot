@@ -55,12 +55,19 @@ def load_data():
             
     return tweet_queue, history, unreviewed_count, media_filter
 
-def save_data(tweet_queue, history, unreviewed_count, media_filter):
+def save_data(tweet_queue, history, unreviewed_count, media_filter, keys=None):
     if store_client:
-        store_client.set_record("queue", tweet_queue)
-        store_client.set_record("history", history)
-        store_client.set_record("unreviewed_count", unreviewed_count)
-        store_client.set_record("media_filter", media_filter)
+        # If no keys specified, save everything (backwards compat)
+        if keys is None:
+            keys = {"queue", "history", "unreviewed_count", "media_filter"}
+        if "queue" in keys:
+            store_client.set_record("queue", tweet_queue)
+        if "history" in keys:
+            store_client.set_record("history", history)
+        if "unreviewed_count" in keys:
+            store_client.set_record("unreviewed_count", unreviewed_count)
+        if "media_filter" in keys:
+            store_client.set_record("media_filter", media_filter)
 
 tweet_queue, history, unreviewed_count, media_filter = load_data()
 
@@ -250,7 +257,7 @@ async def upload_to_gofile(file_bytes, filename="video.mp4"):
         upload_res = await client.post(f"https://{server}.gofile.io/contents/uploadfile", files=files)
         return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.8.1"
+VERSION = "v1.8.2"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
@@ -279,7 +286,7 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
         return False
 
     next_item = tweet_queue.pop(match_index)
-    save_data(tweet_queue, history, unreviewed_count, media_filter)
+    save_data(tweet_queue, history, unreviewed_count, media_filter, keys={"queue"})
     
     keyboard = [
         [
@@ -326,7 +333,7 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
             fallback_msg = f"⚠️ <b>Video too large for Telegram natively (>50MB).</b>\n🔗 <a href='{next_item['url']}'>Direct Media Link</a>\n\n{caption}"
             await context.bot.send_message(chat_id=chat_id, text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
             unreviewed_count += 1
-            save_data(tweet_queue, history, unreviewed_count, media_filter)
+            save_data(tweet_queue, history, unreviewed_count, media_filter, keys={"queue", "unreviewed_count"})
             await status_msg.delete()
             return True
 
@@ -336,7 +343,7 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_video(chat_id=chat_id, video=media_bytes, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
             
         unreviewed_count += 1
-        save_data(tweet_queue, history, unreviewed_count, media_filter)
+        save_data(tweet_queue, history, unreviewed_count, media_filter, keys={"queue", "unreviewed_count"})
         await status_msg.delete()
         return True
     except Exception as e:
@@ -344,7 +351,7 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
         fallback_msg = f"⚠️ <b>Media download failed (Timeout/Error).</b>\n🔗 <a href='{next_item['url']}'>Direct Media Link</a>\n\n{caption}"
         await status_msg.edit_text(text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
         unreviewed_count += 1
-        save_data(tweet_queue, history, unreviewed_count, media_filter)
+        save_data(tweet_queue, history, unreviewed_count, media_filter, keys={"queue", "unreviewed_count"})
         return True
 
 async def drip_job(context: ContextTypes.DEFAULT_TYPE):
@@ -430,6 +437,7 @@ async def fill_buffer(chat_id, context: ContextTypes.DEFAULT_TYPE):
             success = await send_next_tweet(chat_id, context)
             if not success:
                 break
+            await asyncio.sleep(1)  # ponytail: small delay prevents Telegram rate limits on free tier
     finally:
         is_filling = False
 
@@ -499,17 +507,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 from_chat_id=query.message.chat_id,
                 message_id=query.message.message_id
             )
-            await query.message.delete()
-            unreviewed_count = max(0, unreviewed_count - 1)
-            save_data(tweet_queue, history, unreviewed_count, media_filter)
         except Exception as e:
-            await query.message.reply_text(f"Failed to post to channel: {e}")
-            return
+            # Message may have already been deleted — still count it as reviewed
+            print(f"Copy to channel failed: {e}")
+        
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        unreviewed_count = max(0, unreviewed_count - 1)
+        save_data(tweet_queue, history, unreviewed_count, media_filter, keys={"unreviewed_count"})
             
     elif action == "skip":
-        await query.message.delete()
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
         unreviewed_count = max(0, unreviewed_count - 1)
-        save_data(tweet_queue, history, unreviewed_count, media_filter)
+        save_data(tweet_queue, history, unreviewed_count, media_filter, keys={"unreviewed_count"})
         
     elif action == "pause":
         # Stop any active drip feeds
