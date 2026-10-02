@@ -1,0 +1,16 @@
+export interface MediaItem {
+  tweet_url: string;
+  text: string;
+  screen_name?: string;
+  type: 'video' | 'photo';
+  url: string;
+  urls?: string[];
+  width?: number;
+  height?: number;
+  duration_millis?: number;
+}
+
+export interface BotStats {
+  loved: number;
+  skipped: number;
+}
