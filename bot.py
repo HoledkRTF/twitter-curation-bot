@@ -241,8 +241,10 @@ async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     await context.bot.send_message(chat_id=chat_id, text="🔄 Scraping Twitter list...")
     
     try:
-        if not config['twitter_auth_token'] or not config['twitter_ct0']:
-            await context.bot.send_message(chat_id=chat_id, text="Error: Missing Twitter cookies in environment variables!")
+        active_ct0 = custom_cookies.get('ct0') or config['twitter_ct0']
+        active_auth_token = custom_cookies.get('auth_token') or config['twitter_auth_token']
+        if not active_auth_token or not active_ct0:
+            await context.bot.send_message(chat_id=chat_id, text="Error: Missing Twitter cookies! Use /setcookies <auth_token> <ct0>")
             return
             
         # Extract numeric list ID from URL like https://x.com/i/lists/2078086710118715619
@@ -329,7 +331,7 @@ async def upload_to_gofile(filepath, filename="video.mp4"):
         
     return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.10.1"
+VERSION = "v1.10.2"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
@@ -675,7 +677,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if action == "like":
         bot_stats["loved"] = bot_stats.get("loved", 0) + 1
-        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"bot_stats"})
         channel_id = config.get('telegram_channel_id')
         if not channel_id:
             await query.message.reply_text("Error: You haven't set a Channel ID yet! Use /channel <id>")
@@ -697,11 +698,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         review_dict.pop(query.message.message_id, None)
         unreviewed_count = max(0, unreviewed_count - 1)
-        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"unreviewed_count"})
+        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"bot_stats", "unreviewed_count"})
             
     elif action == "skip":
         bot_stats["skipped"] = bot_stats.get("skipped", 0) + 1
-        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"bot_stats"})
         global last_skipped
         item = review_dict.pop(query.message.message_id, None)
         if item:
@@ -712,7 +712,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         unreviewed_count = max(0, unreviewed_count - 1)
-        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"unreviewed_count"})
+        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"bot_stats", "unreviewed_count"})
         
     elif action == "pause":
         # Stop any active drip feeds
