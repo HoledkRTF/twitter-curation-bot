@@ -202,6 +202,11 @@ async def extract_media_from_twitter(list_id):
                             
                             for m in media:
                                 media_obj = {'tweet_url': tweet_url, 'text': tweet_text}
+                                original_info = m.get('original_info', {})
+                                if original_info.get('width') and original_info.get('height'):
+                                    media_obj['width'] = original_info['width']
+                                    media_obj['height'] = original_info['height']
+                                    
                                 if m.get('type') in ['video', 'animated_gif']:
                                     variants = m.get('video_info', {}).get('variants', [])
                                     mp4s = [v for v in variants if v.get('content_type') == 'video/mp4']
@@ -324,7 +329,7 @@ async def upload_to_gofile(filepath, filename="video.mp4"):
         
     return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.10.0"
+VERSION = "v1.10.1"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
@@ -412,7 +417,10 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
             if next_item['type'] == 'photo':
                 msg = await context.bot.send_photo(chat_id=chat_id, photo=f, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
             else:
-                msg = await context.bot.send_video(chat_id=chat_id, video=f, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
+                v_kwargs = {}
+                if next_item.get('width'): v_kwargs['width'] = next_item['width']
+                if next_item.get('height'): v_kwargs['height'] = next_item['height']
+                msg = await context.bot.send_video(chat_id=chat_id, video=f, caption=caption, reply_markup=reply_markup, parse_mode="HTML", **v_kwargs)
             
         review_dict[msg.message_id] = next_item
         unreviewed_count += 1
@@ -583,6 +591,14 @@ async def set_counter_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     except ValueError:
         await update.message.reply_text("❌ Please provide a valid number.")
 
+
+async def purgequeue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global tweet_queue, unreviewed_count
+    length = len(tweet_queue)
+    tweet_queue.clear()
+    unreviewed_count = 0
+    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"queue", "unreviewed_count"})
+    await update.message.reply_text(f"🗑️ Queue purged! Deleted {length} pending items.")
 async def filter_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global media_filter, tweet_queue, history, unreviewed_count
     media_filter = "photo"
@@ -730,6 +746,7 @@ async def post_init(application: Application):
     application.job_queue.run_repeating(auto_scrape_job, interval=3600, first=60)
     await application.bot.set_my_commands([
         ("setlist", "Switch Twitter List URL"),
+        ("purgequeue", "Delete everything in the queue"),
         ("stats", "View lifetime curation stats"),
         ("next", "Load the next item in the queue"),
         ("scrape", "Force a manual scrape for more media"),
@@ -758,6 +775,7 @@ def main():
     app = ApplicationBuilder().token(config['telegram_bot_token']).read_timeout(60.0).write_timeout(60.0).connect_timeout(60.0).pool_timeout(60.0).post_init(post_init).build()
     
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("purgequeue", purgequeue_command))
     app.add_handler(CommandHandler("setlist", setlist_command))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("scrape", scrape_tweets))
