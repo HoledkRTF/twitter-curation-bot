@@ -47,12 +47,14 @@ export function SwipeContainer({ items, onAction }: SwipeContainerProps) {
   const handleNext = () => {
     if (currentIndex < items.length - 1) {
       setCurrentIndex(prev => prev + 1);
+      setIsPlaying(true);
     }
   };
 
   const handlePrev = () => {
     if (currentIndex > 0) {
       setCurrentIndex(prev => prev - 1);
+      setIsPlaying(true);
     }
   };
 
@@ -120,10 +122,9 @@ export function SwipeContainer({ items, onAction }: SwipeContainerProps) {
 
   return (
     <div
-      className="relative w-full h-[100dvh] overflow-hidden"
+      className="relative w-full h-[100dvh] overflow-hidden bg-black"
       onTouchStart={onTouchStart}
       onTouchEnd={onTouchEnd}
-      onClick={() => setIsPlaying(p => !p)}
     >
       <MediaSlide
         key={currentItem.tweet_url}
@@ -131,6 +132,8 @@ export function SwipeContainer({ items, onAction }: SwipeContainerProps) {
         isActive={true}
         isMuted={isMuted}
         isPlaying={isPlaying}
+        onTogglePlay={() => setIsPlaying(p => !p)}
+        onAutoplayMutedFallback={() => setIsMuted(true)}
       />
 
       <OverlayControls
