@@ -38,6 +38,8 @@ def load_data():
     media_filter = "all"
     custom_cookies = {}
     include_retweets = False
+    custom_list_url = ""
+    bot_stats = {"loved": 0, "skipped": 0}
     
     if store_client:
         q_rec = store_client.get_record("queue")
@@ -64,12 +66,20 @@ def load_data():
         if r_rec and r_rec.get('value') is not None:
             include_retweets = r_rec['value']
             
-    return tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets
+        l_rec = store_client.get_record("custom_list_url")
+        if l_rec and l_rec.get('value'):
+            custom_list_url = l_rec['value']
+            
+        s_rec = store_client.get_record("bot_stats")
+        if s_rec and s_rec.get('value'):
+            bot_stats = s_rec['value']
+            
+    return tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats
 
-def save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, keys=None):
+def save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys=None):
     if store_client:
         if keys is None:
-            keys = {"queue", "history", "unreviewed_count", "media_filter", "custom_cookies", "include_retweets"}
+            keys = {"queue", "history", "unreviewed_count", "media_filter", "custom_cookies", "include_retweets", "custom_list_url", "bot_stats"}
         if "queue" in keys:
             store_client.set_record("queue", tweet_queue)
         if "history" in keys:
@@ -82,8 +92,12 @@ def save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cooki
             store_client.set_record("custom_cookies", custom_cookies)
         if "include_retweets" in keys:
             store_client.set_record("include_retweets", include_retweets)
+        if "custom_list_url" in keys:
+            store_client.set_record("custom_list_url", custom_list_url)
+        if "bot_stats" in keys:
+            store_client.set_record("bot_stats", bot_stats)
 
-tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets = load_data()
+tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats = load_data()
 review_dict = {}  # Maps message_id -> item for /undo
 last_skipped = None
 
@@ -227,8 +241,12 @@ async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
             return
             
         # Extract numeric list ID from URL like https://x.com/i/lists/2078086710118715619
-        list_url = config['twitter_list_url']
-        list_id = list_url.rstrip('/').split('/')[-1]
+        active_url = custom_list_url if custom_list_url else config['twitter_list_url']
+        if not active_url:
+            await context.bot.send_message(chat_id=chat_id, text="Error: No Twitter list URL configured!")
+            return
+            
+        list_id = active_url.rstrip('/').split('/')[-1]
         items = await extract_media_from_twitter(list_id)
         
         count = 0
@@ -253,7 +271,7 @@ async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
         if len(history) > 8000:
             history = history[-8000:]
         
-        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets)
+        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats)
         await context.bot.send_message(chat_id=chat_id, text=f"✅ Scraped {len(items)} posts, found {count} brand new ones! Total in queue: {len(tweet_queue)}")
     except Exception as e:
         if "cookies" in str(e).lower() or "expired" in str(e).lower():
@@ -270,7 +288,7 @@ async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global unreviewed_count
     history.clear()
     unreviewed_count = 0
-    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets)
+    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats)
     await update.message.reply_text("🗑️ History cleared! The scraper will now re-fetch older tweets as if they were brand new.")
 
 # Reuse TCP connections
@@ -306,7 +324,7 @@ async def upload_to_gofile(filepath, filename="video.mp4"):
         
     return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.9.0"
+VERSION = "v1.10.0"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
@@ -335,7 +353,7 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
         return False
 
     next_item = tweet_queue.pop(match_index)
-    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, keys={"queue"})
+    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"queue"})
     
     keyboard = [
         [
@@ -386,7 +404,7 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
                 msg = await context.bot.send_message(chat_id=chat_id, text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
                 review_dict[msg.message_id] = next_item
                 unreviewed_count += 1
-                save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, keys={"queue", "unreviewed_count"})
+                save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"queue", "unreviewed_count"})
                 await status_msg.delete()
                 return True
                 
@@ -398,7 +416,7 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
             
         review_dict[msg.message_id] = next_item
         unreviewed_count += 1
-        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, keys={"queue", "unreviewed_count"})
+        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"queue", "unreviewed_count"})
         await status_msg.delete()
         return True
     except Exception as e:
@@ -407,7 +425,7 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
         msg = await status_msg.edit_text(text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
         review_dict[msg.message_id] = next_item
         unreviewed_count += 1
-        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, keys={"queue", "unreviewed_count"})
+        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"queue", "unreviewed_count"})
         return True
     finally:
         if temp_path and os.path.exists(temp_path):
@@ -483,6 +501,38 @@ async def set_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 is_filling = False
 
+
+async def auto_scrape_job(context: ContextTypes.DEFAULT_TYPE):
+    global tweet_queue, history, unreviewed_count, custom_list_url, bot_stats
+    if len(tweet_queue) >= 30:
+        return
+    active_url = custom_list_url if custom_list_url else config['twitter_list_url']
+    if not active_url:
+        return
+    list_id = active_url.rstrip('/').split('/')[-1]
+    try:
+        items = await extract_media_from_twitter(list_id)
+        if not items:
+            return
+        history_set = set(history)
+        queue_urls = {q.get('url') for q in tweet_queue}
+        count = 0
+        added_items = []
+        for item in items:
+            url = item['url']
+            if url not in history_set and url not in queue_urls:
+                added_items.append(item)
+                history.append(url)
+                history_set.add(url)
+                count += 1
+        if added_items:
+            tweet_queue = added_items + tweet_queue
+            if len(history) > 8000:
+                history = history[-8000:]
+            save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"queue", "history"})
+            print(f"Auto-scrape completed: found {count} new items.")
+    except Exception as e:
+        print(f"Auto-scrape failed: {e}")
 async def fill_buffer(chat_id, context: ContextTypes.DEFAULT_TYPE):
     global unreviewed_count, is_filling
     
@@ -528,7 +578,7 @@ async def set_counter_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         if new_count < 0:
             new_count = 0
         unreviewed_count = new_count
-        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets)
+        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats)
         await update.message.reply_text(f"✅ Unreviewed counter manually set to {unreviewed_count}.")
     except ValueError:
         await update.message.reply_text("❌ Please provide a valid number.")
@@ -536,21 +586,38 @@ async def set_counter_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def filter_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global media_filter, tweet_queue, history, unreviewed_count
     media_filter = "photo"
-    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets)
+    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats)
     await update.message.reply_text("🖼️ Filter set: Photos only")
 
 async def filter_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global media_filter, tweet_queue, history, unreviewed_count
     media_filter = "video"
-    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets)
+    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats)
     await update.message.reply_text("🎬 Filter set: Videos only")
 
 async def filter_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global media_filter, tweet_queue, history, unreviewed_count
     media_filter = "all"
-    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets)
+    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats)
     await update.message.reply_text("📦 Filter set: All media")
 
+
+async def setlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global custom_list_url
+    if not context.args:
+        await update.message.reply_text("Usage: /setlist <twitter_list_url>")
+        return
+    custom_list_url = context.args[0]
+    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"custom_list_url"})
+    await update.message.reply_text(f"✅ List updated! Next scrape will use: {custom_list_url}")
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global bot_stats
+    msg = f"📊 *Lifetime Curation Stats*\n\n"
+    msg += f"❤️ Loved: {bot_stats.get('loved', 0)}\n"
+    msg += f"🗑️ Skipped: {bot_stats.get('skipped', 0)}\n"
+    msg += f"🔍 Total Reviewed: {bot_stats.get('loved', 0) + bot_stats.get('skipped', 0)}\n"
+    await update.message.reply_text(msg, parse_mode="Markdown")
 async def setcookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global custom_cookies
     if len(context.args) < 2:
@@ -558,7 +625,7 @@ async def setcookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     custom_cookies['auth_token'] = context.args[0]
     custom_cookies['ct0'] = context.args[1]
-    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, keys={"custom_cookies"})
+    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"custom_cookies"})
     await update.message.reply_text("✅ Twitter cookies updated successfully! You can run /scrape now.")
 
 async def rt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -567,7 +634,7 @@ async def rt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /rt on or /rt off")
         return
     include_retweets = (context.args[0].lower() == 'on')
-    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, keys={"include_retweets"})
+    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"include_retweets"})
     state = "included" if include_retweets else "ignored"
     await update.message.reply_text(f"🔁 Retweets will now be {state} when scraping.")
 
@@ -579,7 +646,7 @@ async def undo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Put it at the front of the queue
     tweet_queue.insert(0, last_skipped)
     last_skipped = None # Consume it
-    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, keys={"queue"})
+    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"queue"})
     await update.message.reply_text("⏪ Undo successful! The skipped item has been placed back at the front of the queue.")
     # Trigger next automatically
     asyncio.ensure_future(fill_buffer(update.message.chat_id, context))
@@ -591,6 +658,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = query.data
     
     if action == "like":
+        bot_stats["loved"] = bot_stats.get("loved", 0) + 1
+        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"bot_stats"})
         channel_id = config.get('telegram_channel_id')
         if not channel_id:
             await query.message.reply_text("Error: You haven't set a Channel ID yet! Use /channel <id>")
@@ -612,9 +681,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         review_dict.pop(query.message.message_id, None)
         unreviewed_count = max(0, unreviewed_count - 1)
-        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, keys={"unreviewed_count"})
+        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"unreviewed_count"})
             
     elif action == "skip":
+        bot_stats["skipped"] = bot_stats.get("skipped", 0) + 1
+        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"bot_stats"})
         global last_skipped
         item = review_dict.pop(query.message.message_id, None)
         if item:
@@ -625,7 +696,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         unreviewed_count = max(0, unreviewed_count - 1)
-        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, keys={"unreviewed_count"})
+        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"unreviewed_count"})
         
     elif action == "pause":
         # Stop any active drip feeds
@@ -656,7 +727,10 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     print(f"Auto-detected Channel ID: {channel_id}")
 
 async def post_init(application: Application):
+    application.job_queue.run_repeating(auto_scrape_job, interval=3600, first=60)
     await application.bot.set_my_commands([
+        ("setlist", "Switch Twitter List URL"),
+        ("stats", "View lifetime curation stats"),
         ("next", "Load the next item in the queue"),
         ("scrape", "Force a manual scrape for more media"),
         ("drip", "Auto-send media on a schedule (e.g. /drip 10)"),
@@ -684,6 +758,8 @@ def main():
     app = ApplicationBuilder().token(config['telegram_bot_token']).read_timeout(60.0).write_timeout(60.0).connect_timeout(60.0).pool_timeout(60.0).post_init(post_init).build()
     
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("setlist", setlist_command))
+    app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("scrape", scrape_tweets))
     app.add_handler(CommandHandler("clearhistory", clear_history))
     app.add_handler(CommandHandler("next", next_command))
