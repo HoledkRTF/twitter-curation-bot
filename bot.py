@@ -201,14 +201,17 @@ async def extract_media_from_twitter(list_id):
                             media = tweet.get('extended_entities', {}).get('media', [])
                             
                             for m in media:
-                                media_obj = {'tweet_url': tweet_url, 'text': tweet_text}
+                                media_obj = {'tweet_url': tweet_url, 'text': tweet_text, 'screen_name': screen_name}
                                 original_info = m.get('original_info', {})
                                 if original_info.get('width') and original_info.get('height'):
                                     media_obj['width'] = original_info['width']
                                     media_obj['height'] = original_info['height']
                                     
                                 if m.get('type') in ['video', 'animated_gif']:
-                                    variants = m.get('video_info', {}).get('variants', [])
+                                    v_info = m.get('video_info', {})
+                                    if v_info.get('duration_millis'):
+                                        media_obj['duration_millis'] = v_info['duration_millis']
+                                    variants = v_info.get('variants', [])
                                     mp4s = [v for v in variants if v.get('content_type') == 'video/mp4']
                                     if mp4s:
                                         sorted_mp4s = sorted(mp4s, key=lambda x: x.get('bitrate', 0), reverse=True)
@@ -331,7 +334,7 @@ async def upload_to_gofile(filepath, filename="video.mp4"):
         
     return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.10.2"
+VERSION = "v1.11.0"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
@@ -373,8 +376,32 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
+    # Video duration and resolution badge
+    badge_parts = []
+    duration_ms = next_item.get('duration_millis')
+    if duration_ms:
+        total_sec = round(duration_ms / 1000)
+        mins = total_sec // 60
+        secs = total_sec % 60
+        badge_parts.append(f"⏱️ {mins}:{secs:02d}")
+        
+    w = next_item.get('width')
+    h = next_item.get('height')
+    if w and h and next_item.get('type') == 'video':
+        badge_parts.append(f"{min(w, h)}p")
+        
+    badge_header = f"<b>{' • '.join(badge_parts)}</b>\n\n" if badge_parts else ""
+    
+    # Creator username directly on link
+    author = next_item.get('screen_name')
+    if not author or author == 'unknown':
+        parts = next_item.get('tweet_url', '').split('/')
+        if len(parts) >= 4 and parts[3] not in ('', 'unknown'):
+            author = parts[3]
+    author_label = f"@{author}" if author and author != 'unknown' else "Link to Tweet"
+
     safe_text = html.escape(next_item['text'][:800])
-    caption = f"{safe_text}\n\n<a href='{next_item['tweet_url']}'>Link to Tweet</a>\n\n<code>{VERSION}</code>"
+    caption = f"{badge_header}{safe_text}\n\n<a href='{next_item['tweet_url']}'>{author_label}</a>\n\n<code>{VERSION}</code>"
     
     status_msg = await context.bot.send_message(chat_id=chat_id, text="Loading next item...")
     temp_path = None
