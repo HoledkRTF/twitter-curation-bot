@@ -18,7 +18,31 @@ export function SwipeContainer({ items, onAction }: SwipeContainerProps) {
   const touchStartX = useRef<number | null>(null);
   const touchStartY = useRef<number | null>(null);
 
-  const currentItem = items[currentIndex];
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('isMuted');
+      if (saved !== null) {
+        setIsMuted(saved === 'true');
+      }
+    } catch {
+      // ignore storage access errors
+    }
+  }, []);
+
+  const handleToggleMute = () => {
+    setIsMuted(prev => {
+      const next = !prev;
+      try {
+        localStorage.setItem('isMuted', String(next));
+      } catch {
+        // ignore storage access errors
+      }
+      return next;
+    });
+  };
+
+  const safeIndex = Math.min(currentIndex, Math.max(0, items.length - 1));
+  const currentItem = items[safeIndex];
 
   const handleNext = () => {
     if (currentIndex < items.length - 1) {
@@ -53,7 +77,7 @@ export function SwipeContainer({ items, onAction }: SwipeContainerProps) {
         e.preventDefault();
         setIsPlaying(p => !p);
       } else if (e.key.toLowerCase() === 'm') {
-        setIsMuted(m => !m);
+        handleToggleMute();
       }
     };
 
@@ -102,6 +126,7 @@ export function SwipeContainer({ items, onAction }: SwipeContainerProps) {
       onClick={() => setIsPlaying(p => !p)}
     >
       <MediaSlide
+        key={currentItem.tweet_url}
         item={currentItem}
         isActive={true}
         isMuted={isMuted}
@@ -112,7 +137,7 @@ export function SwipeContainer({ items, onAction }: SwipeContainerProps) {
         item={currentItem}
         queueCount={items.length}
         isMuted={isMuted}
-        onToggleMute={() => setIsMuted(!isMuted)}
+        onToggleMute={handleToggleMute}
         onLike={handleLike}
         onSkip={handleSkip}
       />

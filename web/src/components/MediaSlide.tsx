@@ -20,7 +20,7 @@ export function MediaSlide({ item, isActive, isMuted, isPlaying }: MediaSlidePro
     } else {
       videoRef.current.pause();
     }
-  }, [isActive, isPlaying, item.type]);
+  }, [isActive, isPlaying, item.type, item.url]);
 
   // Duration & Resolution format
   const durationSec = item.duration_millis ? Math.round(item.duration_millis / 1000) : null;

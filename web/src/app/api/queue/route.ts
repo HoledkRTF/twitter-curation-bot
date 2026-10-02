@@ -17,7 +17,9 @@ export async function GET() {
     const stats = (sRec?.value as unknown as BotStats) || { loved: 0, skipped: 0 };
     const mediaFilter = (fRec?.value as unknown as string) || 'all';
 
-    return NextResponse.json({ queue, stats, mediaFilter });
+    const filteredQueue = mediaFilter !== 'all' ? queue.filter(item => item.type === mediaFilter) : queue;
+
+    return NextResponse.json({ queue: filteredQueue, stats, media_filter: mediaFilter, mediaFilter });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }

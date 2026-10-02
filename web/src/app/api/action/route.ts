@@ -32,7 +32,12 @@ export async function POST(req: NextRequest) {
       const channelId = process.env.TELEGRAM_CHANNEL_ID;
       
       if (botToken && channelId) {
-        const caption = `${item.text}\n\n<a href="${item.tweet_url}">@${item.screen_name || 'author'}</a>`;
+        const escapedText = (item.text || '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .slice(0, 800);
+        const caption = `${escapedText}\n\n<a href="${item.tweet_url}">@${item.screen_name || 'author'}</a>`;
         const method = item.type === 'photo' ? 'sendPhoto' : 'sendVideo';
         const mediaParam = item.type === 'photo' ? 'photo' : 'video';
         

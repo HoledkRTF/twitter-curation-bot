@@ -28,7 +28,10 @@ export function OverlayControls({
       {/* Top Bar */}
       <div className="flex justify-end pointer-events-auto">
         <button
-          onClick={onToggleMute}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleMute();
+          }}
           className="p-3 bg-black/50 backdrop-blur-md rounded-full text-white/90 hover:bg-black/70 active:scale-95 transition-all border border-white/10"
         >
           {isMuted ? <VolumeX className="w-5 h-5 text-red-400" /> : <Volume2 className="w-5 h-5 text-emerald-400" />}
@@ -65,7 +68,10 @@ export function OverlayControls({
         {/* Action Buttons */}
         <div className="flex items-center justify-center gap-6 pb-2">
           <button
-            onClick={onSkip}
+            onClick={(e) => {
+              e.stopPropagation();
+              onSkip();
+            }}
             className="flex-1 max-w-[140px] py-3.5 px-6 bg-red-600/80 hover:bg-red-600 active:scale-90 transition-all rounded-full flex items-center justify-center gap-2 font-semibold text-white shadow-lg backdrop-blur-sm border border-red-500/30"
           >
             <X className="w-5 h-5" />
@@ -73,7 +79,10 @@ export function OverlayControls({
           </button>
 
           <button
-            onClick={onLike}
+            onClick={(e) => {
+              e.stopPropagation();
+              onLike();
+            }}
             className="flex-1 max-w-[140px] py-3.5 px-6 bg-emerald-600/80 hover:bg-emerald-600 active:scale-90 transition-all rounded-full flex items-center justify-center gap-2 font-semibold text-white shadow-lg backdrop-blur-sm border border-emerald-500/30"
           >
             <Heart className="w-5 h-5 fill-current" />
