@@ -3,10 +3,10 @@ import os
 import html
 import asyncio
 import httpx
+import tempfile
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from apify_client import ApifyClient
-
 
 # Config from environment variables
 config = {
@@ -36,6 +36,9 @@ def load_data():
     history = []
     unreviewed_count = 0
     media_filter = "all"
+    custom_cookies = {}
+    include_retweets = False
+    
     if store_client:
         q_rec = store_client.get_record("queue")
         if q_rec and q_rec.get('value'):
@@ -53,13 +56,20 @@ def load_data():
         if f_rec and f_rec.get('value'):
             media_filter = f_rec['value']
             
-    return tweet_queue, history, unreviewed_count, media_filter
+        c_rec = store_client.get_record("custom_cookies")
+        if c_rec and c_rec.get('value'):
+            custom_cookies = c_rec['value']
+            
+        r_rec = store_client.get_record("include_retweets")
+        if r_rec and r_rec.get('value') is not None:
+            include_retweets = r_rec['value']
+            
+    return tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets
 
-def save_data(tweet_queue, history, unreviewed_count, media_filter, keys=None):
+def save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, keys=None):
     if store_client:
-        # If no keys specified, save everything (backwards compat)
         if keys is None:
-            keys = {"queue", "history", "unreviewed_count", "media_filter"}
+            keys = {"queue", "history", "unreviewed_count", "media_filter", "custom_cookies", "include_retweets"}
         if "queue" in keys:
             store_client.set_record("queue", tweet_queue)
         if "history" in keys:
@@ -68,15 +78,24 @@ def save_data(tweet_queue, history, unreviewed_count, media_filter, keys=None):
             store_client.set_record("unreviewed_count", unreviewed_count)
         if "media_filter" in keys:
             store_client.set_record("media_filter", media_filter)
+        if "custom_cookies" in keys:
+            store_client.set_record("custom_cookies", custom_cookies)
+        if "include_retweets" in keys:
+            store_client.set_record("include_retweets", include_retweets)
 
-tweet_queue, history, unreviewed_count, media_filter = load_data()
+tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets = load_data()
+review_dict = {}  # Maps message_id -> item for /undo
+last_skipped = None
 
 async def extract_media_from_twitter(list_id):
     extracted_items = []
     
+    active_ct0 = custom_cookies.get('ct0') or config['twitter_ct0']
+    active_auth_token = custom_cookies.get('auth_token') or config['twitter_auth_token']
+    
     headers = {
         "authorization": "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA",
-        "x-csrf-token": config['twitter_ct0'],
+        "x-csrf-token": active_ct0,
         "x-twitter-active-user": "yes",
         "x-twitter-auth-type": "OAuth2Session",
         "x-twitter-client-language": "en",
@@ -84,8 +103,8 @@ async def extract_media_from_twitter(list_id):
     }
     
     cookies = {
-        "auth_token": config['twitter_auth_token'],
-        "ct0": config['twitter_ct0']
+        "auth_token": active_auth_token,
+        "ct0": active_ct0
     }
     
     # Known queryId for ListLatestTweetsTimeline
@@ -162,8 +181,8 @@ async def extract_media_from_twitter(list_id):
                             tweet_url = f"https://vxtwitter.com/{screen_name}/status/{tweet_id}"
                             tweet_text = tweet.get('full_text', '')
                             
-                            if 'retweeted_status_result' in tweet:
-                                continue # Skip all retweets, only pull original list content
+                            if 'retweeted_status_result' in tweet and not include_retweets:
+                                continue # Skip retweets unless /rt on is set
                                 
                             media = tweet.get('extended_entities', {}).get('media', [])
                             
@@ -230,7 +249,11 @@ async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
         # Prepend new items so the freshest media is served first
         tweet_queue = added_items + tweet_queue
         
-        save_data(tweet_queue, history, unreviewed_count, media_filter)
+        # Prevent history from growing infinitely and crashing memory
+        if len(history) > 8000:
+            history = history[-8000:]
+        
+        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets)
         await context.bot.send_message(chat_id=chat_id, text=f"✅ Scraped {len(items)} posts, found {count} brand new ones! Total in queue: {len(tweet_queue)}")
     except Exception as e:
         if "cookies" in str(e).lower() or "expired" in str(e).lower():
@@ -247,7 +270,7 @@ async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global unreviewed_count
     history.clear()
     unreviewed_count = 0
-    save_data(tweet_queue, history, unreviewed_count, media_filter)
+    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets)
     await update.message.reply_text("🗑️ History cleared! The scraper will now re-fetch older tweets as if they were brand new.")
 
 # Reuse TCP connections
@@ -259,21 +282,31 @@ def get_http_client():
         _http_client = httpx.AsyncClient(timeout=180.0)
     return _http_client
 
-async def fetch_media(url):
+async def fetch_media_to_temp(url, type_='video'):
+    suffix = '.mp4' if type_ == 'video' else '.jpg'
+    fd, path = tempfile.mkstemp(suffix=suffix)
+    os.close(fd)
+    
     client = get_http_client()
-    response = await client.get(url)
-    response.raise_for_status()
-    return response.content
+    async with client.stream("GET", url) as response:
+        response.raise_for_status()
+        with open(path, 'wb') as f:
+            async for chunk in response.aiter_bytes(chunk_size=65536):
+                f.write(chunk)
+    return path
 
-async def upload_to_gofile(file_bytes, filename="video.mp4"):
+async def upload_to_gofile(filepath, filename="video.mp4"):
     client = get_http_client()
     res = await client.get("https://api.gofile.io/servers")
     server = res.json()['data']['servers'][0]['name']
-    files = {'file': (filename, file_bytes)}
-    upload_res = await client.post(f"https://{server}.gofile.io/contents/uploadfile", files=files)
+    
+    with open(filepath, 'rb') as f:
+        files = {'file': (filename, f)}
+        upload_res = await client.post(f"https://{server}.gofile.io/contents/uploadfile", files=files)
+        
     return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.8.3"
+VERSION = "v1.9.0"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
@@ -302,7 +335,7 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
         return False
 
     next_item = tweet_queue.pop(match_index)
-    save_data(tweet_queue, history, unreviewed_count, media_filter, keys={"queue"})
+    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, keys={"queue"})
     
     keyboard = [
         [
@@ -319,56 +352,69 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     caption = f"{safe_text}\n\n<a href='{next_item['tweet_url']}'>Link to Tweet</a>\n\n<code>{VERSION}</code>"
     
     status_msg = await context.bot.send_message(chat_id=chat_id, text="Loading next item...")
+    temp_path = None
     try:
-        media_bytes = None
         urls_to_try = next_item.get('urls', [next_item['url']])
         
-        highest_bytes = await fetch_media(urls_to_try[0])
+        temp_path = await fetch_media_to_temp(urls_to_try[0], next_item['type'])
+        file_size = os.path.getsize(temp_path)
         
-        if len(highest_bytes) > 50_000_000:
+        if file_size > 50_000_000:
             await status_msg.edit_text("Uploading full-res to Gofile (too large for Telegram)...")
             try:
-                gofile_link = await upload_to_gofile(highest_bytes)
+                gofile_link = await upload_to_gofile(temp_path)
                 caption += f"\n\n⚠️ <b>DOWNSCALED PREVIEW</b> (Original exceeds Telegram's 50MB limit)\n📥 <a href='{gofile_link}'>Download Full-Res (Gofile)</a>"
             except Exception as e:
                 print(f"Gofile upload failed: {e}")
                 caption += f"\n\n⚠️ <b>DOWNSCALED PREVIEW</b> (Original exceeds Telegram's 50MB limit, Gofile upload failed)"
                 
+            # Try to fetch smaller variants until one is < 50MB
+            success_downscale = False
             for u in urls_to_try[1:]:
                 try:
-                    temp_bytes = await fetch_media(u)
-                    if len(temp_bytes) <= 50_000_000:
-                        media_bytes = temp_bytes
+                    if temp_path and os.path.exists(temp_path):
+                        os.remove(temp_path)
+                    temp_path = await fetch_media_to_temp(u, next_item['type'])
+                    if os.path.getsize(temp_path) <= 50_000_000:
+                        success_downscale = True
                         break
                 except Exception:
                     continue
-        else:
-            media_bytes = highest_bytes
+                    
+            if not success_downscale:
+                fallback_msg = f"⚠️ <b>Video too large for Telegram natively (>50MB).</b>\n🔗 <a href='{next_item['url']}'>Direct Media Link</a>\n\n{caption}"
+                msg = await context.bot.send_message(chat_id=chat_id, text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
+                review_dict[msg.message_id] = next_item
+                unreviewed_count += 1
+                save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, keys={"queue", "unreviewed_count"})
+                await status_msg.delete()
+                return True
                 
-        if not media_bytes or len(media_bytes) > 50_000_000:
-            fallback_msg = f"⚠️ <b>Video too large for Telegram natively (>50MB).</b>\n🔗 <a href='{next_item['url']}'>Direct Media Link</a>\n\n{caption}"
-            await context.bot.send_message(chat_id=chat_id, text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
-            unreviewed_count += 1
-            save_data(tweet_queue, history, unreviewed_count, media_filter, keys={"queue", "unreviewed_count"})
-            await status_msg.delete()
-            return True
-
-        if next_item['type'] == 'photo':
-            await context.bot.send_photo(chat_id=chat_id, photo=media_bytes, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
-        else:
-            await context.bot.send_video(chat_id=chat_id, video=media_bytes, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
+        with open(temp_path, 'rb') as f:
+            if next_item['type'] == 'photo':
+                msg = await context.bot.send_photo(chat_id=chat_id, photo=f, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
+            else:
+                msg = await context.bot.send_video(chat_id=chat_id, video=f, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
             
+        review_dict[msg.message_id] = next_item
         unreviewed_count += 1
-        save_data(tweet_queue, history, unreviewed_count, media_filter, keys={"queue", "unreviewed_count"})
+        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, keys={"queue", "unreviewed_count"})
         await status_msg.delete()
         return True
     except Exception as e:
         print(f"Error downloading/sending media: {e}")
         fallback_msg = f"⚠️ <b>Media download failed (Timeout/Error).</b>\n🔗 <a href='{next_item['url']}'>Direct Media Link</a>\n\n{caption}"
-        await status_msg.edit_text(text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
+        msg = await status_msg.edit_text(text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
+        review_dict[msg.message_id] = next_item
         unreviewed_count += 1
-        save_data(tweet_queue, history, unreviewed_count, media_filter, keys={"queue", "unreviewed_count"})
+        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, keys={"queue", "unreviewed_count"})
         return True
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception as e:
+                print(f"Failed to clean up temp file: {e}")
 
 async def drip_job(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
@@ -482,7 +528,7 @@ async def set_counter_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         if new_count < 0:
             new_count = 0
         unreviewed_count = new_count
-        save_data(tweet_queue, history, unreviewed_count, media_filter)
+        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets)
         await update.message.reply_text(f"✅ Unreviewed counter manually set to {unreviewed_count}.")
     except ValueError:
         await update.message.reply_text("❌ Please provide a valid number.")
@@ -490,20 +536,53 @@ async def set_counter_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def filter_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global media_filter, tweet_queue, history, unreviewed_count
     media_filter = "photo"
-    save_data(tweet_queue, history, unreviewed_count, media_filter)
+    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets)
     await update.message.reply_text("🖼️ Filter set: Photos only")
 
 async def filter_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global media_filter, tweet_queue, history, unreviewed_count
     media_filter = "video"
-    save_data(tweet_queue, history, unreviewed_count, media_filter)
+    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets)
     await update.message.reply_text("🎬 Filter set: Videos only")
 
 async def filter_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global media_filter, tweet_queue, history, unreviewed_count
     media_filter = "all"
-    save_data(tweet_queue, history, unreviewed_count, media_filter)
+    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets)
     await update.message.reply_text("📦 Filter set: All media")
+
+async def setcookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global custom_cookies
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /setcookies <auth_token> <ct0>")
+        return
+    custom_cookies['auth_token'] = context.args[0]
+    custom_cookies['ct0'] = context.args[1]
+    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, keys={"custom_cookies"})
+    await update.message.reply_text("✅ Twitter cookies updated successfully! You can run /scrape now.")
+
+async def rt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global include_retweets
+    if not context.args or context.args[0].lower() not in ['on', 'off']:
+        await update.message.reply_text("Usage: /rt on or /rt off")
+        return
+    include_retweets = (context.args[0].lower() == 'on')
+    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, keys={"include_retweets"})
+    state = "included" if include_retweets else "ignored"
+    await update.message.reply_text(f"🔁 Retweets will now be {state} when scraping.")
+
+async def undo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global last_skipped, tweet_queue
+    if not last_skipped:
+        await update.message.reply_text("No recently skipped item found in memory.")
+        return
+    # Put it at the front of the queue
+    tweet_queue.insert(0, last_skipped)
+    last_skipped = None # Consume it
+    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, keys={"queue"})
+    await update.message.reply_text("⏪ Undo successful! The skipped item has been placed back at the front of the queue.")
+    # Trigger next automatically
+    asyncio.ensure_future(fill_buffer(update.message.chat_id, context))
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global unreviewed_count
@@ -531,16 +610,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.delete()
         except Exception:
             pass
+        review_dict.pop(query.message.message_id, None)
         unreviewed_count = max(0, unreviewed_count - 1)
-        save_data(tweet_queue, history, unreviewed_count, media_filter, keys={"unreviewed_count"})
+        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, keys={"unreviewed_count"})
             
     elif action == "skip":
+        global last_skipped
+        item = review_dict.pop(query.message.message_id, None)
+        if item:
+            last_skipped = item
+            
         try:
             await query.message.delete()
         except Exception:
             pass
         unreviewed_count = max(0, unreviewed_count - 1)
-        save_data(tweet_queue, history, unreviewed_count, media_filter, keys={"unreviewed_count"})
+        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, keys={"unreviewed_count"})
         
     elif action == "pause":
         # Stop any active drip feeds
@@ -583,6 +668,9 @@ async def post_init(application: Application):
         ("fv", "Filter: Videos only"),
         ("fp", "Filter: Photos only"),
         ("fa", "Filter: All media"),
+        ("undo", "Undo your last skip"),
+        ("setcookies", "Update Twitter cookies"),
+        ("rt", "Toggle retweets (on/off)"),
         ("v", "Check current bot version"),
     ])
 
@@ -605,6 +693,9 @@ def main():
     app.add_handler(CommandHandler("fv", filter_video))
     app.add_handler(CommandHandler("fp", filter_photo))
     app.add_handler(CommandHandler("fa", filter_all))
+    app.add_handler(CommandHandler("undo", undo_command))
+    app.add_handler(CommandHandler("setcookies", setcookies_command))
+    app.add_handler(CommandHandler("rt", rt_command))
     app.add_handler(CommandHandler("channel", set_channel))
     app.add_handler(CommandHandler("drip", start_drip))
     app.add_handler(CommandHandler("stopdrip", stop_drip))
