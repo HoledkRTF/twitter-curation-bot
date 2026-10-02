@@ -119,81 +119,81 @@ async def extract_media_from_twitter(list_id):
 
     cursor = None
     
-    async with httpx.AsyncClient() as client:
-        # Loop through pages to gather enough media
-        for _ in range(10): # Fetch up to 10 pages
-            if cursor:
-                variables["cursor"] = cursor
-            
-            params = {
-                "variables": json.dumps(variables),
-                "features": json.dumps(features),
-            }
-            
-            try:
-                res = await client.get(url, headers=headers, cookies=cookies, params=params, timeout=30.0)
-                if res.status_code != 200:
-                    err_text = res.text[:200]
-                    print(f"Twitter API Error: {res.status_code} - {err_text}")
-                    if res.status_code in [401, 403] or "auth" in err_text.lower():
-                        raise Exception("⚠️ Twitter cookies (auth_token or ct0) are invalid or have expired! Please update them in Render.")
-                    break
-                    
-                data = res.json()
-                instructions = data.get('data', {}).get('list', {}).get('tweets_timeline', {}).get('timeline', {}).get('instructions', [])
+    client = get_http_client()
+    # Loop through pages to gather enough media
+    for _ in range(10): # Fetch up to 10 pages
+        if cursor:
+            variables["cursor"] = cursor
+        
+        params = {
+            "variables": json.dumps(variables),
+            "features": json.dumps(features),
+        }
+        
+        try:
+            res = await client.get(url, headers=headers, cookies=cookies, params=params, timeout=30.0)
+            if res.status_code != 200:
+                err_text = res.text[:200]
+                print(f"Twitter API Error: {res.status_code} - {err_text}")
+                if res.status_code in [401, 403] or "auth" in err_text.lower():
+                    raise Exception("⚠️ Twitter cookies (auth_token or ct0) are invalid or have expired! Please update them in Render.")
+                break
                 
-                new_cursor = None
-                for inst in instructions:
-                    if inst.get('type') == 'TimelineAddEntries':
-                        for entry in inst.get('entries', []):
-                            content = entry.get('content', {})
+            data = res.json()
+            instructions = data.get('data', {}).get('list', {}).get('tweets_timeline', {}).get('timeline', {}).get('instructions', [])
+                
+            new_cursor = None
+            for inst in instructions:
+                if inst.get('type') == 'TimelineAddEntries':
+                    for entry in inst.get('entries', []):
+                        content = entry.get('content', {})
+                        
+                        # Extract Next Page Cursor
+                        if content.get('entryType') == 'TimelineTimelineCursor' and content.get('cursorType') == 'Bottom':
+                            new_cursor = content.get('value')
                             
-                            # Extract Next Page Cursor
-                            if content.get('entryType') == 'TimelineTimelineCursor' and content.get('cursorType') == 'Bottom':
-                                new_cursor = content.get('value')
+                        # Extract Tweet Data
+                        if content.get('entryType') == 'TimelineTimelineItem':
+                            result = content.get('itemContent', {}).get('tweet_results', {}).get('result', {})
+                            tweet = result.get('legacy', {})
+                            core = result.get('core', {}).get('user_results', {}).get('result', {}).get('legacy', {})
+                            screen_name = core.get('screen_name', 'unknown')
+                            tweet_id = tweet.get('id_str', '')
+                            tweet_url = f"https://vxtwitter.com/{screen_name}/status/{tweet_id}"
+                            tweet_text = tweet.get('full_text', '')
+                            
+                            if 'retweeted_status_result' in tweet:
+                                continue # Skip all retweets, only pull original list content
                                 
-                            # Extract Tweet Data
-                            if content.get('entryType') == 'TimelineTimelineItem':
-                                result = content.get('itemContent', {}).get('tweet_results', {}).get('result', {})
-                                tweet = result.get('legacy', {})
-                                core = result.get('core', {}).get('user_results', {}).get('result', {}).get('legacy', {})
-                                screen_name = core.get('screen_name', 'unknown')
-                                tweet_id = tweet.get('id_str', '')
-                                tweet_url = f"https://vxtwitter.com/{screen_name}/status/{tweet_id}"
-                                tweet_text = tweet.get('full_text', '')
-                                
-                                if 'retweeted_status_result' in tweet:
-                                    continue # Skip all retweets, only pull original list content
-                                    
-                                media = tweet.get('extended_entities', {}).get('media', [])
-                                
-                                for m in media:
-                                    media_obj = {'tweet_url': tweet_url, 'text': tweet_text}
-                                    if m.get('type') in ['video', 'animated_gif']:
-                                        variants = m.get('video_info', {}).get('variants', [])
-                                        mp4s = [v for v in variants if v.get('content_type') == 'video/mp4']
-                                        if mp4s:
-                                            sorted_mp4s = sorted(mp4s, key=lambda x: x.get('bitrate', 0), reverse=True)
-                                            media_obj['urls'] = [v['url'] for v in sorted_mp4s]
-                                            media_obj['url'] = sorted_mp4s[0]['url'] # Keep primary for backwards compatibility
-                                            media_obj['type'] = 'video'
-                                            extracted_items.append(media_obj)
-                                    elif m.get('type') == 'photo':
-                                        media_obj['url'] = m['media_url_https']
-                                        media_obj['type'] = 'photo'
+                            media = tweet.get('extended_entities', {}).get('media', [])
+                            
+                            for m in media:
+                                media_obj = {'tweet_url': tweet_url, 'text': tweet_text}
+                                if m.get('type') in ['video', 'animated_gif']:
+                                    variants = m.get('video_info', {}).get('variants', [])
+                                    mp4s = [v for v in variants if v.get('content_type') == 'video/mp4']
+                                    if mp4s:
+                                        sorted_mp4s = sorted(mp4s, key=lambda x: x.get('bitrate', 0), reverse=True)
+                                        media_obj['urls'] = [v['url'] for v in sorted_mp4s]
+                                        media_obj['url'] = sorted_mp4s[0]['url'] # Keep primary for backwards compatibility
+                                        media_obj['type'] = 'video'
                                         extracted_items.append(media_obj)
-                                            
-                # If we didn't get a new cursor, or we have 500+ items, stop paginating
-                if not new_cursor or len(extracted_items) >= 500:
-                    break
-                cursor = new_cursor
-                
-                # Small delay to avoid rate limits
-                await asyncio.sleep(1)
-            except Exception as e:
-                print(f"Error making GraphQL request: {e}")
-                if "cookies" in str(e).lower() or "expired" in str(e).lower():
-                    raise e
+                                elif m.get('type') == 'photo':
+                                    media_obj['url'] = m['media_url_https']
+                                    media_obj['type'] = 'photo'
+                                    extracted_items.append(media_obj)
+                                        
+            # If we didn't get a new cursor, or we have 500+ items, stop paginating
+            if not new_cursor or len(extracted_items) >= 500:
+                break
+            cursor = new_cursor
+            
+            # Small delay to avoid rate limits
+            await asyncio.sleep(1)
+        except Exception as e:
+            print(f"Error making GraphQL request: {e}")
+            if "cookies" in str(e).lower() or "expired" in str(e).lower():
+                raise e
                 break
                 
     return extracted_items
@@ -214,10 +214,17 @@ async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
         
         count = 0
         added_items = []
+        
+        # Optimize O(N^2) list scan to O(1) lookups
+        history_set = set(history)
+        queue_urls = {q.get('url') for q in tweet_queue}
+        
         for item in items:
-            if item['url'] not in history and not any(q.get('url') == item['url'] for q in tweet_queue):
+            url = item['url']
+            if url not in history_set and url not in queue_urls:
                 added_items.append(item)
-                history.append(item['url'])
+                history.append(url)
+                history_set.add(url)
                 count += 1
                 
         # Prepend new items so the freshest media is served first
@@ -243,21 +250,30 @@ async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_data(tweet_queue, history, unreviewed_count, media_filter)
     await update.message.reply_text("🗑️ History cleared! The scraper will now re-fetch older tweets as if they were brand new.")
 
+# Reuse TCP connections
+_http_client = None
+
+def get_http_client():
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(timeout=180.0)
+    return _http_client
+
 async def fetch_media(url):
-    async with httpx.AsyncClient() as client:
-        response = await client.get(url, timeout=180.0)
-        response.raise_for_status()
-        return response.content
+    client = get_http_client()
+    response = await client.get(url)
+    response.raise_for_status()
+    return response.content
 
 async def upload_to_gofile(file_bytes, filename="video.mp4"):
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        res = await client.get("https://api.gofile.io/servers")
-        server = res.json()['data']['servers'][0]['name']
-        files = {'file': (filename, file_bytes)}
-        upload_res = await client.post(f"https://{server}.gofile.io/contents/uploadfile", files=files)
-        return upload_res.json()['data']['downloadPage']
+    client = get_http_client()
+    res = await client.get("https://api.gofile.io/servers")
+    server = res.json()['data']['servers'][0]['name']
+    files = {'file': (filename, file_bytes)}
+    upload_res = await client.post(f"https://{server}.gofile.io/contents/uploadfile", files=files)
+    return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.8.2"
+VERSION = "v1.8.3"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
