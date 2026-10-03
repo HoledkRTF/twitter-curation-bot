@@ -24,15 +24,33 @@ export function MediaSlide({
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [srcIndex, setSrcIndex] = useState(0);
+  const [useProxy, setUseProxy] = useState(false);
+  const [imageUseProxy, setImageUseProxy] = useState(false);
+
+  // Reset indices and proxy fallback when active item changes
+  useEffect(() => {
+    setSrcIndex(0);
+    setUseProxy(false);
+    setImageUseProxy(false);
+    setIsLoading(true);
+  }, [item.tweet_url, item.url]);
 
   const allUrls = item.urls && item.urls.length > 0 ? item.urls : [item.url];
-  const currentSrc = allUrls[srcIndex] || item.url;
+  const rawVideoSrc = allUrls[srcIndex] || item.url;
+  const currentVideoSrc = useProxy
+    ? `/api/proxy?url=${encodeURIComponent(rawVideoSrc)}`
+    : rawVideoSrc;
+
+  const currentImageSrc = imageUseProxy
+    ? `/api/proxy?url=${encodeURIComponent(item.url)}`
+    : item.url;
 
   // Imperatively sync muted property to satisfy browser Autoplay policies
   useEffect(() => {
     if (videoRef.current) {
       videoRef.current.muted = isMuted;
       videoRef.current.defaultMuted = isMuted;
+      videoRef.current.setAttribute('referrerpolicy', 'no-referrer');
     }
   }, [isMuted]);
 
@@ -62,12 +80,26 @@ export function MediaSlide({
     } else {
       video.pause();
     }
-  }, [isActive, isPlaying, currentSrc, item.type, onAutoplayMutedFallback]);
+  }, [isActive, isPlaying, currentVideoSrc, item.type, onAutoplayMutedFallback]);
 
-  // Handle video error by trying next URL variant
+  // Handle video error: first try proxy fallback, then try next URL variant
   const handleVideoError = () => {
-    if (srcIndex + 1 < allUrls.length) {
+    if (!useProxy) {
+      setIsLoading(true);
+      setUseProxy(true);
+    } else if (srcIndex + 1 < allUrls.length) {
+      setIsLoading(true);
       setSrcIndex(prev => prev + 1);
+      setUseProxy(false);
+    } else {
+      setIsLoading(false);
+    }
+  };
+
+  const handleImageError = () => {
+    if (!imageUseProxy) {
+      setIsLoading(true);
+      setImageUseProxy(true);
     } else {
       setIsLoading(false);
     }
@@ -88,13 +120,13 @@ export function MediaSlide({
       {item.type === 'video' ? (
         <video
           ref={videoRef}
-          src={currentSrc}
+          src={currentVideoSrc}
           className="w-full h-full object-contain"
           playsInline
           loop
           muted={isMuted}
           preload="auto"
-          crossOrigin="anonymous"
+          {...({ referrerPolicy: 'no-referrer' } as any)}
           onWaiting={() => setIsLoading(true)}
           onPlaying={() => setIsLoading(false)}
           onCanPlay={() => setIsLoading(false)}
@@ -102,10 +134,12 @@ export function MediaSlide({
         />
       ) : (
         <img
-          src={item.url}
+          src={currentImageSrc}
           alt={item.text || 'Media'}
           className="w-full h-full object-contain"
+          referrerPolicy="no-referrer"
           onLoad={() => setIsLoading(false)}
+          onError={handleImageError}
         />
       )}
 
