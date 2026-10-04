@@ -1,8 +1,14 @@
 'use client';
 
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect, useState, useImperativeHandle, forwardRef } from 'react';
 import { Play, Loader2 } from 'lucide-react';
 import { MediaItem } from '@/lib/types';
+
+export interface MediaSlideHandle {
+  seek: (delta: number) => void;
+  getDuration: () => number;
+  getCurrentTime: () => number;
+}
 
 interface MediaSlideProps {
   item: MediaItem;
@@ -13,26 +19,47 @@ interface MediaSlideProps {
   onAutoplayMutedFallback?: () => void;
 }
 
-export function MediaSlide({
-  item,
-  isActive,
-  isMuted,
-  isPlaying,
-  onTogglePlay,
-  onAutoplayMutedFallback,
-}: MediaSlideProps) {
+export const MediaSlide = forwardRef<MediaSlideHandle, MediaSlideProps>(function MediaSlide(
+  {
+    item,
+    isActive,
+    isMuted,
+    isPlaying,
+    onTogglePlay,
+    onAutoplayMutedFallback,
+  },
+  ref
+) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [srcIndex, setSrcIndex] = useState(0);
   const [useProxy, setUseProxy] = useState(false);
   const [imageUseProxy, setImageUseProxy] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
 
-  // Reset indices and proxy fallback when active item changes
+  // Expose seeking control to parent
+  useImperativeHandle(ref, () => ({
+    seek: (delta: number) => {
+      if (videoRef.current) {
+        const d = videoRef.current.duration || 0;
+        const newTime = Math.max(0, Math.min(d, videoRef.current.currentTime + delta));
+        videoRef.current.currentTime = newTime;
+        setCurrentTime(newTime);
+      }
+    },
+    getDuration: () => duration,
+    getCurrentTime: () => currentTime,
+  }));
+
+  // Reset indices, proxy fallback, and timing when active item changes
   useEffect(() => {
     setSrcIndex(0);
     setUseProxy(false);
     setImageUseProxy(false);
     setIsLoading(true);
+    setCurrentTime(0);
+    setDuration(0);
   }, [item.tweet_url, item.url]);
 
   const allUrls = item.urls && item.urls.length > 0 ? item.urls : [item.url];
@@ -68,7 +95,6 @@ export function MediaSlide({
           })
           .catch((err: any) => {
             if (err.name === 'NotAllowedError') {
-              // Browser blocked unmuted autoplay - fallback to muted so it plays!
               video.muted = true;
               video.play().catch(() => {});
               if (onAutoplayMutedFallback) {
@@ -105,8 +131,18 @@ export function MediaSlide({
     }
   };
 
+  const handleScrub = (e: React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>) => {
+    e.stopPropagation();
+    if (!videoRef.current || !duration) return;
+    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    videoRef.current.currentTime = pct * duration;
+    setCurrentTime(pct * duration);
+  };
+
   // Duration & Resolution format
-  const durationSec = item.duration_millis ? Math.round(item.duration_millis / 1000) : null;
+  const durationSec = duration > 0 ? Math.round(duration) : (item.duration_millis ? Math.round(item.duration_millis / 1000) : null);
   const durationStr = durationSec
     ? `${Math.floor(durationSec / 60)}:${(durationSec % 60).toString().padStart(2, '0')}`
     : null;
@@ -121,12 +157,18 @@ export function MediaSlide({
         <video
           ref={videoRef}
           src={currentVideoSrc}
-          className="w-full h-full object-contain"
+          className="w-full h-full object-contain pointer-events-none"
           playsInline
           loop
           muted={isMuted}
           preload="auto"
           {...({ referrerPolicy: 'no-referrer' } as any)}
+          onTimeUpdate={() => {
+            if (videoRef.current) setCurrentTime(videoRef.current.currentTime);
+          }}
+          onLoadedMetadata={() => {
+            if (videoRef.current) setDuration(videoRef.current.duration);
+          }}
           onWaiting={() => setIsLoading(true)}
           onPlaying={() => setIsLoading(false)}
           onCanPlay={() => setIsLoading(false)}
@@ -136,7 +178,7 @@ export function MediaSlide({
         <img
           src={currentImageSrc}
           alt={item.text || 'Media'}
-          className="w-full h-full object-contain"
+          className="w-full h-full object-contain pointer-events-none"
           referrerPolicy="no-referrer"
           onLoad={() => setIsLoading(false)}
           onError={handleImageError}
@@ -167,6 +209,24 @@ export function MediaSlide({
           {resolutionStr && <span>{resolutionStr}</span>}
         </div>
       )}
+
+      {/* Bottom Video Progress Scrub Bar */}
+      {item.type === 'video' && duration > 0 && (
+        <div
+          onClick={handleScrub}
+          onTouchStart={handleScrub}
+          className="absolute bottom-0 left-0 right-0 h-4 z-40 group flex items-end cursor-pointer"
+        >
+          <div className="w-full h-1 group-hover:h-2 bg-white/20 transition-all relative">
+            <div
+              className="h-full bg-emerald-500 relative transition-[width] duration-75 ease-linear"
+              style={{ width: `${Math.min(100, (currentTime / duration) * 100)}%` }}
+            >
+              <div className="absolute right-0 top-1/2 -translate-y-1/2 w-3 h-3 bg-white rounded-full shadow opacity-0 group-hover:opacity-100 transition-opacity" />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
-}
+});

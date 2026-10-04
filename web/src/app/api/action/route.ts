@@ -4,9 +4,10 @@ import { MediaItem, BotStats } from '@/lib/types';
 
 export async function POST(req: NextRequest) {
   try {
-    const { action, tweetUrl } = await req.json();
-    if (!action || !tweetUrl) {
-      return NextResponse.json({ error: 'Missing action or tweetUrl' }, { status: 400 });
+    const body = await req.json();
+    const { action, tweetUrl, item: undoItem, previousAction } = body;
+    if (!action) {
+      return NextResponse.json({ error: 'Missing action' }, { status: 400 });
     }
 
     const store = await getStoreClient();
@@ -17,6 +18,31 @@ export async function POST(req: NextRequest) {
 
     let queue = (qRec?.value as unknown as MediaItem[]) || [];
     let stats = (sRec?.value as unknown as BotStats) || { loved: 0, skipped: 0 };
+
+    if (action === 'undo') {
+      if (!undoItem) {
+        return NextResponse.json({ error: 'Missing item for undo' }, { status: 400 });
+      }
+      if (!queue.some(i => i.tweet_url === undoItem.tweet_url)) {
+        queue.unshift(undoItem);
+      }
+      if (previousAction === 'like') {
+        stats.loved = Math.max(0, (stats.loved || 0) - 1);
+      } else {
+        stats.skipped = Math.max(0, (stats.skipped || 0) - 1);
+      }
+
+      await Promise.all([
+        store.setRecord({ key: 'queue', value: queue as any }),
+        store.setRecord({ key: 'bot_stats', value: stats as any }),
+      ]);
+
+      return NextResponse.json({ success: true, remainingCount: queue.length });
+    }
+
+    if (!tweetUrl) {
+      return NextResponse.json({ error: 'Missing tweetUrl' }, { status: 400 });
+    }
 
     const itemIndex = queue.findIndex(item => item.tweet_url === tweetUrl);
     if (itemIndex === -1) {

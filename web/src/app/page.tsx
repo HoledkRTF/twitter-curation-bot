@@ -1,13 +1,23 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
+import { RotateCcw } from 'lucide-react';
 import { MediaItem } from '@/lib/types';
 import { SwipeContainer } from '@/components/SwipeContainer';
+
+interface UndoState {
+  item: MediaItem;
+  action: 'like' | 'skip';
+}
 
 export default function HomePage() {
   const [items, setItems] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Undo Toast state
+  const [undoState, setUndoState] = useState<UndoState | null>(null);
+  const undoTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const fetchQueue = async () => {
     setLoading(true);
@@ -38,6 +48,17 @@ export default function HomePage() {
     // Optimistic removal from UI
     setItems(prev => prev.filter(i => i.tweet_url !== item.tweet_url));
 
+    // Clear any previous undo timer
+    if (undoTimeoutRef.current) {
+      clearTimeout(undoTimeoutRef.current);
+    }
+
+    // Set new undo state with 4.5s lifespan
+    setUndoState({ item, action });
+    undoTimeoutRef.current = setTimeout(() => {
+      setUndoState(null);
+    }, 4500);
+
     try {
       await fetch('/api/action', {
         method: 'POST',
@@ -46,6 +67,35 @@ export default function HomePage() {
       });
     } catch (e) {
       console.error(`Failed to execute ${action}:`, e);
+    }
+  };
+
+  const handleUndo = async () => {
+    if (!undoState) return;
+
+    const { item, action } = undoState;
+
+    if (undoTimeoutRef.current) {
+      clearTimeout(undoTimeoutRef.current);
+      undoTimeoutRef.current = null;
+    }
+    setUndoState(null);
+
+    // Optimistically restore item to top of queue
+    setItems(prev => [item, ...prev]);
+
+    try {
+      await fetch('/api/action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'undo',
+          item,
+          previousAction: action,
+        }),
+      });
+    } catch (e) {
+      console.error('Failed to undo action:', e);
     }
   };
 
@@ -73,5 +123,30 @@ export default function HomePage() {
     );
   }
 
-  return <SwipeContainer items={items} onAction={handleAction} />;
+  return (
+    <main className="relative w-full h-[100dvh] bg-black overflow-hidden">
+      <SwipeContainer
+        items={items}
+        onAction={handleAction}
+        onUndo={handleUndo}
+        canUndo={!!undoState}
+      />
+
+      {/* Floating Undo Toast */}
+      {undoState && (
+        <div className="fixed bottom-28 md:bottom-24 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-4 py-2 bg-neutral-900/90 text-white rounded-full border border-white/20 shadow-2xl backdrop-blur-md pointer-events-auto transition-all animate-bounce">
+          <span className="text-xs md:text-sm font-medium text-white/80">
+            {undoState.action === 'like' ? 'Loved clip' : 'Skipped clip'}
+          </span>
+          <button
+            onClick={handleUndo}
+            className="px-3 py-1 bg-white text-black text-xs font-bold rounded-full hover:bg-white/90 active:scale-95 transition-all flex items-center gap-1 shadow"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            Undo
+          </button>
+        </div>
+      )}
+    </main>
+  );
 }
