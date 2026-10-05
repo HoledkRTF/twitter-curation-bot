@@ -334,7 +334,7 @@ async def upload_to_gofile(filepath, filename="video.mp4"):
         
     return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.11.0"
+VERSION = "v1.11.1"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
@@ -696,6 +696,34 @@ async def undo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Trigger next automatically
     asyncio.ensure_future(fill_buffer(update.message.chat_id, context))
 
+async def cleanup_reviewed_message(query, action):
+    deleted = False
+    try:
+        await query.message.delete()
+        deleted = True
+    except Exception as e:
+        print(f"Delete message failed (likely >48h old): {e}")
+
+    if not deleted:
+        # Telegram API strictly forbids bots from deleting messages >48 hours old in private chats.
+        # Fall back to stripping the interactive buttons so it cannot be clicked again,
+        # and prepend a clear status badge to the caption.
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception as e:
+            print(f"Failed to strip reply markup on old message: {e}")
+
+        try:
+            tag = "❤️ <b>[SAVED TO CHANNEL]</b>" if action == "like" else "🗑️ <b>[SKIPPED]</b>"
+            orig_caption = query.message.caption_html or query.message.text_html or ""
+            new_caption = f"{tag}\n\n{orig_caption}"[:1024]
+            if query.message.caption:
+                await query.message.edit_caption(caption=new_caption, parse_mode="HTML")
+            elif query.message.text:
+                await query.message.edit_text(text=new_caption, parse_mode="HTML")
+        except Exception as e:
+            print(f"Failed to edit caption on old message: {e}")
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global unreviewed_count
     query = update.callback_query
@@ -719,10 +747,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Message may have already been deleted — still count it as reviewed
             print(f"Copy to channel failed: {e}")
         
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
+        await cleanup_reviewed_message(query, "like")
         review_dict.pop(query.message.message_id, None)
         unreviewed_count = max(0, unreviewed_count - 1)
         save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"bot_stats", "unreviewed_count"})
@@ -734,10 +759,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if item:
             last_skipped = item
             
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
+        await cleanup_reviewed_message(query, "skip")
         unreviewed_count = max(0, unreviewed_count - 1)
         save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"bot_stats", "unreviewed_count"})
         
