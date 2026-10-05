@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Curation Web Player',
+  title: 'Goon Swipe',
   description: 'Full-screen continuous media curation player',
   referrer: 'no-referrer',
 };
