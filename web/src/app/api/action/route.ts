@@ -64,19 +64,37 @@ export async function POST(req: NextRequest) {
           .replace(/>/g, '&gt;')
           .slice(0, 800);
         const caption = `${escapedText}\n\n<a href="${item.tweet_url}">@${item.screen_name || 'author'}</a>`;
-        const method = item.type === 'photo' ? 'sendPhoto' : 'sendVideo';
-        const mediaParam = item.type === 'photo' ? 'photo' : 'video';
-        
-        await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            chat_id: channelId,
-            [mediaParam]: item.url,
-            caption,
-            parse_mode: 'HTML',
-          }),
-        });
+
+        if (item.type === 'album' && item.urls && item.urls.length > 1) {
+          const media = item.urls.map((photoUrl, idx) => ({
+            type: 'photo',
+            media: photoUrl,
+            ...(idx === 0 ? { caption, parse_mode: 'HTML' } : {}),
+          }));
+
+          await fetch(`https://api.telegram.org/bot${botToken}/sendMediaGroup`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: channelId,
+              media,
+            }),
+          });
+        } else {
+          const method = item.type === 'photo' ? 'sendPhoto' : 'sendVideo';
+          const mediaParam = item.type === 'photo' ? 'photo' : 'video';
+          
+          await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: channelId,
+              [mediaParam]: item.url,
+              caption,
+              parse_mode: 'HTML',
+            }),
+          });
+        }
       }
     } else if (action === 'skip') {
       stats.skipped = (stats.skipped || 0) + 1;

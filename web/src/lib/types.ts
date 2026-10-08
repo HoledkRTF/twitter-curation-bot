@@ -2,7 +2,7 @@ export interface MediaItem {
   tweet_url: string;
   text: string;
   screen_name?: string;
-  type: 'video' | 'photo';
+  type: 'video' | 'photo' | 'album';
   url: string;
   urls?: string[];
   width?: number;
