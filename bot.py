@@ -132,30 +132,37 @@ def save_lists():
         store_client.set_record("list2_url", list2_url)
         store_client.set_record("active_list", active_list)
 
-def save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys=None):
+def save_data(tweet_queue=None, history=None, unreviewed_count=None, media_filter=None, custom_cookies=None, include_retweets=None, custom_list_url=None, bot_stats=None, keys=None):
     if store_client:
         if keys is None:
             keys = {"queue", "history", "unreviewed_count", "media_filter", "custom_cookies", "include_retweets", "custom_list_url", "bot_stats"}
         if "queue" in keys:
-            store_client.set_record("queue", tweet_queue)
+            val = tweet_queue if tweet_queue is not None else globals().get('tweet_queue', [])
+            store_client.set_record("queue", val)
         if "history" in keys:
-            store_client.set_record("history", history)
+            val = history if history is not None else globals().get('history', [])
+            store_client.set_record("history", val)
         if "unreviewed_count" in keys:
-            store_client.set_record("unreviewed_count", unreviewed_count)
+            val = unreviewed_count if unreviewed_count is not None else globals().get('unreviewed_count', 0)
+            store_client.set_record("unreviewed_count", val)
         if "media_filter" in keys:
-            store_client.set_record("media_filter", media_filter)
+            val = media_filter if media_filter is not None else globals().get('media_filter', 'all')
+            store_client.set_record("media_filter", val)
         if "custom_cookies" in keys:
-            store_client.set_record("custom_cookies", custom_cookies)
+            val = custom_cookies if custom_cookies is not None else globals().get('custom_cookies', {})
+            store_client.set_record("custom_cookies", val)
         if "include_retweets" in keys:
-            store_client.set_record("include_retweets", include_retweets)
+            val = include_retweets if include_retweets is not None else globals().get('include_retweets', False)
+            store_client.set_record("include_retweets", val)
         if "custom_list_url" in keys or "lists" in keys:
             curr_url = get_active_list_url()
             store_client.set_record("custom_list_url", curr_url)
-            store_client.set_record("list1_url", list1_url)
-            store_client.set_record("list2_url", list2_url)
-            store_client.set_record("active_list", active_list)
+            store_client.set_record("list1_url", globals().get('list1_url', ''))
+            store_client.set_record("list2_url", globals().get('list2_url', ''))
+            store_client.set_record("active_list", globals().get('active_list', '1'))
         if "bot_stats" in keys:
-            store_client.set_record("bot_stats", bot_stats)
+            val = bot_stats if bot_stats is not None else globals().get('bot_stats', {})
+            store_client.set_record("bot_stats", val)
 
 review_dict = {}  # Maps message_id -> item for /undo
 last_skipped = None
@@ -428,7 +435,7 @@ async def upload_to_gofile(filepath, filename="video.mp4"):
         
     return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.13.2"
+VERSION = "v1.13.3"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     global tweet_queue, history, unreviewed_count, bot_stats
@@ -1010,149 +1017,154 @@ async def cleanup_reviewed_message(query, action):
             print(f"Failed to edit caption on old message: {e}")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global unreviewed_count
+    global unreviewed_count, custom_list_url, active_list, bot_stats, last_skipped, tweet_queue, history, media_filter, custom_cookies, include_retweets, list1_url, list2_url
     query = update.callback_query
     await query.answer()
     action = query.data
+    chat_id = update.effective_chat.id if update.effective_chat else query.message.chat_id
     
-    if action == "like":
-        bot_stats["loved"] = bot_stats.get("loved", 0) + 1
-        channel_id = config.get('telegram_channel_id')
-        if not channel_id:
-            await query.message.reply_text("Error: You haven't set a Channel ID yet! Use /channel <id>")
-            return
-            
-        item = review_dict.get(query.message.message_id)
-        if item and item.get('type') == 'album':
-            copied = False
-            if item.get('album_message_ids'):
+    try:
+        if action == "like":
+            bot_stats["loved"] = bot_stats.get("loved", 0) + 1
+            channel_id = config.get('telegram_channel_id')
+            if not channel_id:
+                await query.message.reply_text("Error: You haven't set a Channel ID yet! Use /channel <id>")
+                return
+                
+            item = review_dict.get(query.message.message_id)
+            if item and item.get('type') == 'album':
+                copied = False
+                if item.get('album_message_ids'):
+                    try:
+                        await context.bot.copy_messages(
+                            chat_id=channel_id,
+                            from_chat_id=query.message.chat_id,
+                            message_ids=item['album_message_ids']
+                        )
+                        copied = True
+                    except Exception as e:
+                        print(f"Copy messages failed for album: {e}")
+                if not copied:
+                    try:
+                        photo_urls = item.get('urls', [item.get('url')])
+                        caption_text = html.escape(item.get('text', '')[:800])
+                        author = item.get('screen_name', 'unknown')
+                        author_label = f"@{author}" if author != 'unknown' else "Link to Tweet"
+                        src_num = item.get('source_list_num')
+                        list_label = f" • <i>List {src_num}</i>" if src_num else ""
+                        cap = f"{caption_text}\n\n<a href='{item.get('tweet_url')}'>{author_label}</a>{list_label}"
+                        input_media = [
+                            InputMediaPhoto(media=u, caption=cap, parse_mode="HTML")
+                            if i == 0 else InputMediaPhoto(media=u)
+                            for i, u in enumerate(photo_urls)
+                        ]
+                        await context.bot.send_media_group(chat_id=channel_id, media=input_media)
+                    except Exception as e:
+                        print(f"Direct album send to channel failed: {e}")
+            else:
                 try:
-                    await context.bot.copy_messages(
+                    await context.bot.copy_message(
                         chat_id=channel_id,
                         from_chat_id=query.message.chat_id,
-                        message_ids=item['album_message_ids']
+                        message_id=query.message.message_id
                     )
-                    copied = True
                 except Exception as e:
-                    print(f"Copy messages failed for album: {e}")
-            if not copied:
-                try:
-                    photo_urls = item.get('urls', [item.get('url')])
-                    caption_text = html.escape(item.get('text', '')[:800])
-                    author = item.get('screen_name', 'unknown')
-                    author_label = f"@{author}" if author != 'unknown' else "Link to Tweet"
-                    src_num = item.get('source_list_num')
-                    list_label = f" • <i>List {src_num}</i>" if src_num else ""
-                    cap = f"{caption_text}\n\n<a href='{item.get('tweet_url')}'>{author_label}</a>{list_label}"
-                    input_media = [
-                        InputMediaPhoto(media=u, caption=cap, parse_mode="HTML")
-                        if i == 0 else InputMediaPhoto(media=u)
-                        for i, u in enumerate(photo_urls)
-                    ]
-                    await context.bot.send_media_group(chat_id=channel_id, media=input_media)
-                except Exception as e:
-                    print(f"Direct album send to channel failed: {e}")
-        else:
-            try:
-                await context.bot.copy_message(
-                    chat_id=channel_id,
-                    from_chat_id=query.message.chat_id,
-                    message_id=query.message.message_id
-                )
-            except Exception as e:
-                # Message may have already been deleted — still count it as reviewed
-                print(f"Copy to channel failed: {e}")
-        
-        await cleanup_reviewed_message(query, "like")
-        if item and item.get('album_message_ids'):
-            for mid in item['album_message_ids']:
-                try:
-                    await context.bot.delete_message(chat_id=query.message.chat_id, message_id=mid)
-                except Exception:
-                    pass
-        review_dict.pop(query.message.message_id, None)
-        unreviewed_count = max(0, unreviewed_count - 1)
-        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"bot_stats", "unreviewed_count"})
+                    # Message may have already been deleted — still count it as reviewed
+                    print(f"Copy to channel failed: {e}")
             
-    elif action == "skip":
-        bot_stats["skipped"] = bot_stats.get("skipped", 0) + 1
-        global last_skipped
-        item = review_dict.pop(query.message.message_id, None)
-        if item:
-            last_skipped = item
-            if item.get('album_message_ids'):
+            await cleanup_reviewed_message(query, "like")
+            if item and item.get('album_message_ids'):
                 for mid in item['album_message_ids']:
                     try:
                         await context.bot.delete_message(chat_id=query.message.chat_id, message_id=mid)
                     except Exception:
                         pass
+            review_dict.pop(query.message.message_id, None)
+            unreviewed_count = max(0, unreviewed_count - 1)
+            save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"bot_stats", "unreviewed_count"})
+                
+        elif action == "skip":
+            bot_stats["skipped"] = bot_stats.get("skipped", 0) + 1
+            item = review_dict.pop(query.message.message_id, None)
+            if item:
+                last_skipped = item
+                if item.get('album_message_ids'):
+                    for mid in item['album_message_ids']:
+                        try:
+                            await context.bot.delete_message(chat_id=query.message.chat_id, message_id=mid)
+                        except Exception:
+                            pass
+                
+            await cleanup_reviewed_message(query, "skip")
+            unreviewed_count = max(0, unreviewed_count - 1)
+            save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"bot_stats", "unreviewed_count"})
             
-        await cleanup_reviewed_message(query, "skip")
-        unreviewed_count = max(0, unreviewed_count - 1)
-        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"bot_stats", "unreviewed_count"})
-        
-    elif action == "pause":
-        # Stop any active drip feeds
-        if context.job_queue:
-            current_jobs = context.job_queue.get_jobs_by_name(str(query.message.chat_id))
-            for job in current_jobs:
-                job.schedule_removal()
-                
-        # Remove the pause button from this message to show it's paused
-        keyboard = [
-            [
-                InlineKeyboardButton("❤️ Love (Save to Channel)", callback_data="like"),
-                InlineKeyboardButton("👎 Skip", callback_data="skip")
+        elif action == "pause":
+            # Stop any active drip feeds
+            if context.job_queue:
+                current_jobs = context.job_queue.get_jobs_by_name(str(query.message.chat_id))
+                for job in current_jobs:
+                    job.schedule_removal()
+                    
+            # Remove the pause button from this message to show it's paused
+            keyboard = [
+                [
+                    InlineKeyboardButton("❤️ Love (Save to Channel)", callback_data="like"),
+                    InlineKeyboardButton("👎 Skip", callback_data="skip")
+                ]
             ]
-        ]
-        await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
-                
-        await context.bot.send_message(chat_id=query.message.chat_id, text="⏸️ Paused! (Auto-drip stopped). The video above is safely in your chat history—just Love/Skip it when you're ready to continue.")
-        return
-
-    elif action.startswith("switch_list:"):
-        target = action.split(":")[1]
-        if target == "2" and not list2_url:
-            await query.answer("List 2 is not configured yet! Use /list2 <url>", show_alert=True)
+            await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+                    
+            await context.bot.send_message(chat_id=query.message.chat_id, text="⏸️ Paused! (Auto-drip stopped). The video above is safely in your chat history—just Love/Skip it when you're ready to continue.")
             return
-        active_list = target
-        save_lists()
-        custom_list_url = get_active_list_url()
-        await query.answer(f"Switched to List {active_list}!")
-        l1_disp = list1_url if list1_url else "Not configured"
-        l2_disp = list2_url if list2_url else "Not configured (set with /list2 <url>)"
-        msg = "📋 <b>Twitter Lists</b>\n\n"
-        msg += f"1️⃣ <b>List 1:</b> {l1_disp} {'<b>[ACTIVE ✅]</b>' if active_list == '1' else ''}\n\n"
-        msg += f"2️⃣ <b>List 2:</b> {l2_disp} {'<b>[ACTIVE ✅]</b>' if active_list == '2' else ''}\n\n"
-        msg += f"Current scraping source: <b>List {active_list}</b>\n\n"
-        msg += "<i>Commands:</i>\n"
-        msg += "• <code>/list1 [url]</code>\n"
-        msg += "• <code>/list2 [url]</code>\n"
-        msg += "• <code>/switchlist</code> (toggle)"
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ List 1" if active_list == "1" else "▶️ Switch to List 1", callback_data="switch_list:1"),
-                InlineKeyboardButton("✅ List 2" if active_list == "2" else "▶️ Switch to List 2", callback_data="switch_list:2"),
-            ],
-            [
-                InlineKeyboardButton("🔄 Scrape Active List", callback_data="scrape_active")
+
+        elif action.startswith("switch_list:"):
+            target = action.split(":")[1]
+            if target == "2" and not list2_url:
+                await query.answer("List 2 is not configured yet! Use /list2 <url>", show_alert=True)
+                return
+            active_list = target
+            save_lists()
+            custom_list_url = get_active_list_url()
+            await query.answer(f"Switched to List {active_list}!")
+            l1_disp = list1_url if list1_url else "Not configured"
+            l2_disp = list2_url if list2_url else "Not configured (set with /list2 <url>)"
+            msg = "📋 <b>Twitter Lists</b>\n\n"
+            msg += f"1️⃣ <b>List 1:</b> {l1_disp} {'<b>[ACTIVE ✅]</b>' if active_list == '1' else ''}\n\n"
+            msg += f"2️⃣ <b>List 2:</b> {l2_disp} {'<b>[ACTIVE ✅]</b>' if active_list == '2' else ''}\n\n"
+            msg += f"Current scraping source: <b>List {active_list}</b>\n\n"
+            msg += "<i>Commands:</i>\n"
+            msg += "• <code>/list1 [url]</code>\n"
+            msg += "• <code>/list2 [url]</code>\n"
+            msg += "• <code>/switchlist</code> (toggle)"
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ List 1" if active_list == "1" else "▶️ Switch to List 1", callback_data="switch_list:1"),
+                    InlineKeyboardButton("✅ List 2" if active_list == "2" else "▶️ Switch to List 2", callback_data="switch_list:2"),
+                ],
+                [
+                    InlineKeyboardButton("🔄 Scrape Active List", callback_data="scrape_active")
+                ]
             ]
-        ]
-        try:
-            await query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
-        except Exception:
-            pass
-        return
+            try:
+                await query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+            except Exception:
+                pass
+            return
 
-    elif action == "scrape_active":
-        await query.answer("Starting scrape...")
-        await do_scrape(context, query.message.chat_id)
-        if tweet_queue:
-            asyncio.ensure_future(fill_buffer(query.message.chat_id, context))
-        return
+        elif action == "scrape_active":
+            await query.answer("Starting scrape...")
+            await do_scrape(context, query.message.chat_id)
+            if tweet_queue:
+                asyncio.ensure_future(fill_buffer(chat_id, context))
+            return
 
-    # Automatically fill the buffer back up to 5 as a background task
-    asyncio.ensure_future(fill_buffer(query.message.chat_id, context))
+        # Automatically fill the buffer back up to 5 as a background task
+        asyncio.ensure_future(fill_buffer(chat_id, context))
+    except Exception as e:
+        print(f"Error in button_handler: {e}")
+        import traceback
+        traceback.print_exc()
 
 async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     channel_id = str(update.channel_post.chat.id)
