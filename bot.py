@@ -428,16 +428,15 @@ async def upload_to_gofile(filepath, filename="video.mp4"):
         
     return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.13.1"
+VERSION = "v1.13.2"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
+    global tweet_queue, history, unreviewed_count, bot_stats
     if not tweet_queue:
         await do_scrape(context, chat_id)
         if not tweet_queue:
             await context.bot.send_message(chat_id=chat_id, text="Still empty! Try scraping again later when the Twitter list has new posts.")
             return False
-
-    global unreviewed_count
     
     match_index = -1
     for i, item in enumerate(tweet_queue):
@@ -741,12 +740,14 @@ async def auto_scrape_job(context: ContextTypes.DEFAULT_TYPE):
 async def fill_buffer(chat_id, context: ContextTypes.DEFAULT_TYPE, notify_if_empty=False):
     global unreviewed_count, is_filling
     
-    # Don't auto-fill if a drip feed is actively running for this chat
-    if context.job_queue:
+    # Don't auto-fill if a drip feed is actively running for this chat (unless manually requested via /next)
+    if not notify_if_empty and context.job_queue:
         if context.job_queue.get_jobs_by_name(str(chat_id)):
             return
             
     if is_filling:
+        if notify_if_empty:
+            await context.bot.send_message(chat_id=chat_id, text="⏳ Already preparing your next posts, one moment...")
         return
 
     if not tweet_queue:
@@ -770,7 +771,12 @@ async def fill_buffer(chat_id, context: ContextTypes.DEFAULT_TYPE, notify_if_emp
         is_filling = False
 
 async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    asyncio.ensure_future(fill_buffer(update.message.chat_id, context, notify_if_empty=True))
+    chat_id = update.effective_chat.id if update.effective_chat else update.message.chat_id
+    try:
+        await fill_buffer(chat_id, context, notify_if_empty=True)
+    except Exception as e:
+        print(f"Error in next_command: {e}")
+        await context.bot.send_message(chat_id=chat_id, text=f"❌ Error serving next item: {e}")
 
 async def version_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(VERSION)
