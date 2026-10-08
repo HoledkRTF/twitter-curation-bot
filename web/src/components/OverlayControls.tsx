@@ -102,6 +102,9 @@ export function OverlayControls({
             {item.source_list_num && (
               <span className="text-xs text-white/40">• List {item.source_list_num}</span>
             )}
+            {item.type === 'album' && item.urls && item.urls.length > 1 && (
+              <span className="text-xs text-white/40">• 📸 {item.urls.length} photos</span>
+            )}
           </div>
 
           <p

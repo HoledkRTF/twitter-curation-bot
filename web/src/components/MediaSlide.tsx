@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useRef, useEffect, useState, useImperativeHandle, forwardRef } from 'react';
-import { Play, Loader2 } from 'lucide-react';
+import { Play, Loader2, ChevronLeft, ChevronRight } from 'lucide-react';
 import { MediaItem } from '@/lib/types';
 
 export interface MediaSlideHandle {
@@ -33,6 +33,7 @@ export const MediaSlide = forwardRef<MediaSlideHandle, MediaSlideProps>(function
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [srcIndex, setSrcIndex] = useState(0);
+  const [albumIndex, setAlbumIndex] = useState(0);
   const [useProxy, setUseProxy] = useState(false);
   const [imageUseProxy, setImageUseProxy] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -55,6 +56,7 @@ export const MediaSlide = forwardRef<MediaSlideHandle, MediaSlideProps>(function
   // Reset indices, proxy fallback, and timing when active item changes
   useEffect(() => {
     setSrcIndex(0);
+    setAlbumIndex(0);
     setUseProxy(false);
     setImageUseProxy(false);
     setIsLoading(true);
@@ -68,9 +70,13 @@ export const MediaSlide = forwardRef<MediaSlideHandle, MediaSlideProps>(function
     ? `/api/proxy?url=${encodeURIComponent(rawVideoSrc)}`
     : rawVideoSrc;
 
+  const isAlbum = item.type === 'album' || (item.type === 'photo' && !!item.urls && item.urls.length > 1);
+  const albumUrls = isAlbum && item.urls && item.urls.length > 0 ? item.urls : [item.url];
+  const currentPhotoUrl = albumUrls[albumIndex] || item.url;
+
   const currentImageSrc = imageUseProxy
-    ? `/api/proxy?url=${encodeURIComponent(item.url)}`
-    : item.url;
+    ? `/api/proxy?url=${encodeURIComponent(currentPhotoUrl)}`
+    : currentPhotoUrl;
 
   // Imperatively sync muted property to satisfy browser Autoplay policies
   useEffect(() => {
@@ -131,6 +137,24 @@ export const MediaSlide = forwardRef<MediaSlideHandle, MediaSlideProps>(function
     }
   };
 
+  const handlePrevPhoto = (e: React.MouseEvent | React.TouchEvent) => {
+    e.stopPropagation();
+    if (albumIndex > 0) {
+      setAlbumIndex(prev => prev - 1);
+      setIsLoading(true);
+      setImageUseProxy(false);
+    }
+  };
+
+  const handleNextPhoto = (e: React.MouseEvent | React.TouchEvent) => {
+    e.stopPropagation();
+    if (albumIndex < albumUrls.length - 1) {
+      setAlbumIndex(prev => prev + 1);
+      setIsLoading(true);
+      setImageUseProxy(false);
+    }
+  };
+
   const handleScrub = (e: React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>) => {
     e.stopPropagation();
     if (!videoRef.current || !duration) return;
@@ -175,14 +199,57 @@ export const MediaSlide = forwardRef<MediaSlideHandle, MediaSlideProps>(function
           onError={handleVideoError}
         />
       ) : (
-        <img
-          src={currentImageSrc}
-          alt={item.text || 'Media'}
-          className="w-full h-full object-contain pointer-events-none"
-          referrerPolicy="no-referrer"
-          onLoad={() => setIsLoading(false)}
-          onError={handleImageError}
-        />
+        <div className="relative w-full h-full flex items-center justify-center">
+          <img
+            key={currentPhotoUrl}
+            src={currentImageSrc}
+            alt={item.text || 'Media'}
+            className="w-full h-full object-contain pointer-events-none"
+            referrerPolicy="no-referrer"
+            onLoad={() => setIsLoading(false)}
+            onError={handleImageError}
+          />
+
+          {/* Album Indicator & Pagination Dots */}
+          {isAlbum && albumUrls.length > 1 && (
+            <div className="absolute top-16 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-3.5 py-1.5 bg-black/60 backdrop-blur-md rounded-full border border-white/10 shadow-lg pointer-events-none">
+              <span className="text-xs font-bold text-white/90 mr-1">
+                📸 {albumIndex + 1}/{albumUrls.length}
+              </span>
+              {albumUrls.map((_, idx) => (
+                <span
+                  key={idx}
+                  className={`h-1.5 rounded-full transition-all ${
+                    idx === albumIndex ? 'w-4 bg-white shadow' : 'w-1.5 bg-white/40'
+                  }`}
+                />
+              ))}
+            </div>
+          )}
+
+          {/* Left / Right Carousel Arrow Buttons */}
+          {isAlbum && albumUrls.length > 1 && albumIndex > 0 && (
+            <button
+              onClick={handlePrevPhoto}
+              onTouchStart={handlePrevPhoto}
+              aria-label="Previous photo"
+              className="absolute left-3 top-1/2 -translate-y-1/2 z-20 w-10 h-10 rounded-full bg-black/60 backdrop-blur-md border border-white/10 text-white flex items-center justify-center hover:bg-black/90 active:scale-90 transition-all shadow-xl cursor-pointer pointer-events-auto"
+            >
+              <ChevronLeft className="w-6 h-6" />
+            </button>
+          )}
+
+          {isAlbum && albumUrls.length > 1 && albumIndex < albumUrls.length - 1 && (
+            <button
+              onClick={handleNextPhoto}
+              onTouchStart={handleNextPhoto}
+              aria-label="Next photo"
+              className="absolute right-3 top-1/2 -translate-y-1/2 z-20 w-10 h-10 rounded-full bg-black/60 backdrop-blur-md border border-white/10 text-white flex items-center justify-center hover:bg-black/90 active:scale-90 transition-all shadow-xl cursor-pointer pointer-events-auto"
+            >
+              <ChevronRight className="w-6 h-6" />
+            </button>
+          )}
+        </div>
       )}
 
       {/* Buffering Spinner */}
