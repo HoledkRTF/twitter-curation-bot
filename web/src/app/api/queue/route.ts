@@ -7,10 +7,13 @@ export const dynamic = 'force-dynamic';
 export async function GET() {
   try {
     const store = await getStoreClient();
-    const [qRec, sRec, fRec] = await Promise.all([
+    const [qRec, sRec, fRec, actRec, l1Rec, l2Rec] = await Promise.all([
       store.getRecord('queue'),
       store.getRecord('bot_stats'),
       store.getRecord('media_filter'),
+      store.getRecord('active_list'),
+      store.getRecord('list1_url'),
+      store.getRecord('list2_url'),
     ]);
 
     const queue = (qRec?.value as unknown as MediaItem[]) || [];
@@ -19,7 +22,15 @@ export async function GET() {
 
     const filteredQueue = mediaFilter !== 'all' ? queue.filter(item => item.type === mediaFilter) : queue;
 
-    return NextResponse.json({ queue: filteredQueue, stats, media_filter: mediaFilter, mediaFilter });
+    return NextResponse.json({
+      queue: filteredQueue,
+      stats,
+      media_filter: mediaFilter,
+      mediaFilter,
+      active_list: String(actRec?.value || '1'),
+      list1_url: String(l1Rec?.value || ''),
+      list2_url: String(l2Rec?.value || ''),
+    });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }

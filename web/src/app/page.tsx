@@ -14,6 +14,7 @@ export default function HomePage() {
   const [items, setItems] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [activeList, setActiveList] = useState<string>('1');
 
   // Undo Toast state
   const [undoState, setUndoState] = useState<UndoState | null>(null);
@@ -32,6 +33,7 @@ export default function HomePage() {
         throw new Error(data.error);
       }
       if (data.queue) setItems(data.queue);
+      if (data.active_list) setActiveList(String(data.active_list));
     } catch (e: any) {
       console.error('Failed to load queue:', e);
       setError(e?.message || 'Failed to load queue');
@@ -99,6 +101,19 @@ export default function HomePage() {
     }
   };
 
+  const handleSwitchList = async (targetList: '1' | '2') => {
+    setActiveList(targetList);
+    try {
+      await fetch('/api/list', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ active_list: targetList }),
+      });
+    } catch (e) {
+      console.error('Failed to switch active list:', e);
+    }
+  };
+
   if (loading) {
     return (
       <div className="w-full h-[100dvh] flex items-center justify-center bg-black text-white">
@@ -130,6 +145,8 @@ export default function HomePage() {
         onAction={handleAction}
         onUndo={handleUndo}
         canUndo={!!undoState}
+        activeList={activeList}
+        onSwitchList={handleSwitchList}
       />
 
       {/* Floating Undo Toast */}

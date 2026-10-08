@@ -8,6 +8,8 @@ export interface MediaItem {
   width?: number;
   height?: number;
   duration_millis?: number;
+  source_list?: string;
+  source_list_num?: string;
 }
 
 export interface BotStats {

@@ -17,9 +17,18 @@ interface SwipeContainerProps {
   onAction: (action: 'like' | 'skip', item: MediaItem) => void;
   onUndo?: () => void;
   canUndo?: boolean;
+  activeList?: string;
+  onSwitchList?: (listNum: '1' | '2') => void;
 }
 
-export function SwipeContainer({ items, onAction, onUndo, canUndo }: SwipeContainerProps) {
+export function SwipeContainer({
+  items,
+  onAction,
+  onUndo,
+  canUndo,
+  activeList,
+  onSwitchList,
+}: SwipeContainerProps) {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isMuted, setIsMuted] = useState(true);
   const [isPlaying, setIsPlaying] = useState(true);
@@ -317,6 +326,8 @@ export function SwipeContainer({ items, onAction, onUndo, canUndo }: SwipeContai
         onToggleMute={handleToggleMute}
         onLike={() => handleLike()}
         onSkip={handleSkip}
+        activeList={activeList}
+        onSwitchList={onSwitchList}
       />
 
       {/* Desktop Hotkey Legend Pill */}

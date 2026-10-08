@@ -40,6 +40,9 @@ def load_data():
     include_retweets = False
     custom_list_url = ""
     bot_stats = {"loved": 0, "skipped": 0}
+    list1_url = ""
+    list2_url = ""
+    active_list = "1"
     
     if store_client:
         q_rec = store_client.get_record("queue")
@@ -66,15 +69,46 @@ def load_data():
         if r_rec and r_rec.get('value') is not None:
             include_retweets = r_rec['value']
             
-        l_rec = store_client.get_record("custom_list_url")
-        if l_rec and l_rec.get('value'):
-            custom_list_url = l_rec['value']
+        l1_rec = store_client.get_record("list1_url")
+        if l1_rec and l1_rec.get('value'):
+            list1_url = l1_rec['value']
+        else:
+            c_rec = store_client.get_record("custom_list_url")
+            if c_rec and c_rec.get('value'):
+                list1_url = c_rec['value']
+
+        l2_rec = store_client.get_record("list2_url")
+        if l2_rec and l2_rec.get('value'):
+            list2_url = l2_rec['value']
+
+        act_rec = store_client.get_record("active_list")
+        if act_rec and act_rec.get('value'):
+            active_list = str(act_rec['value'])
             
         s_rec = store_client.get_record("bot_stats")
         if s_rec and s_rec.get('value'):
             bot_stats = s_rec['value']
+
+    if not list1_url:
+        list1_url = config['twitter_list_url']
+    custom_list_url = list2_url if (active_list == "2" and list2_url) else list1_url
             
-    return tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats
+    return tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, list1_url, list2_url, active_list
+
+tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, list1_url, list2_url, active_list = load_data()
+
+def get_active_list_url():
+    if active_list == "2" and list2_url:
+        return list2_url
+    return list1_url or config['twitter_list_url']
+
+def save_lists():
+    if store_client:
+        curr_url = get_active_list_url()
+        store_client.set_record("custom_list_url", curr_url)
+        store_client.set_record("list1_url", list1_url)
+        store_client.set_record("list2_url", list2_url)
+        store_client.set_record("active_list", active_list)
 
 def save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys=None):
     if store_client:
@@ -92,12 +126,15 @@ def save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cooki
             store_client.set_record("custom_cookies", custom_cookies)
         if "include_retweets" in keys:
             store_client.set_record("include_retweets", include_retweets)
-        if "custom_list_url" in keys:
-            store_client.set_record("custom_list_url", custom_list_url)
+        if "custom_list_url" in keys or "lists" in keys:
+            curr_url = get_active_list_url()
+            store_client.set_record("custom_list_url", curr_url)
+            store_client.set_record("list1_url", list1_url)
+            store_client.set_record("list2_url", list2_url)
+            store_client.set_record("active_list", active_list)
         if "bot_stats" in keys:
             store_client.set_record("bot_stats", bot_stats)
 
-tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats = load_data()
 review_dict = {}  # Maps message_id -> item for /undo
 last_skipped = None
 
@@ -241,7 +278,7 @@ async def extract_media_from_twitter(list_id):
 
 async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     global tweet_queue, history, unreviewed_count
-    await context.bot.send_message(chat_id=chat_id, text="🔄 Scraping Twitter list...")
+    await context.bot.send_message(chat_id=chat_id, text=f"🔄 Scraping Twitter List {active_list}...")
     
     try:
         active_ct0 = custom_cookies.get('ct0') or config['twitter_ct0']
@@ -250,10 +287,10 @@ async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
             await context.bot.send_message(chat_id=chat_id, text="Error: Missing Twitter cookies! Use /setcookies <auth_token> <ct0>")
             return
             
-        # Extract numeric list ID from URL like https://x.com/i/lists/2078086710118715619
-        active_url = custom_list_url if custom_list_url else config['twitter_list_url']
+        # Extract numeric list ID from active list URL
+        active_url = get_active_list_url()
         if not active_url:
-            await context.bot.send_message(chat_id=chat_id, text="Error: No Twitter list URL configured!")
+            await context.bot.send_message(chat_id=chat_id, text=f"Error: No Twitter list URL configured for List {active_list}! Set it with /list{active_list} <url>")
             return
             
         list_id = active_url.rstrip('/').split('/')[-1]
@@ -267,6 +304,8 @@ async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
         queue_urls = {q.get('url') for q in tweet_queue}
         
         for item in items:
+            item['source_list'] = f"List {active_list}"
+            item['source_list_num'] = active_list
             url = item['url']
             if url not in history_set and url not in queue_urls:
                 added_items.append(item)
@@ -282,7 +321,7 @@ async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
             history = history[-8000:]
         
         save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats)
-        await context.bot.send_message(chat_id=chat_id, text=f"✅ Scraped {len(items)} posts, found {count} brand new ones! Total in queue: {len(tweet_queue)}")
+        await context.bot.send_message(chat_id=chat_id, text=f"✅ Scraped {len(items)} posts from List {active_list}, found {count} brand new ones! Total in queue: {len(tweet_queue)}")
     except Exception as e:
         if "cookies" in str(e).lower() or "expired" in str(e).lower():
             await context.bot.send_message(chat_id=chat_id, text=f"{e}")
@@ -334,7 +373,7 @@ async def upload_to_gofile(filepath, filename="video.mp4"):
         
     return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.11.1"
+VERSION = "v1.12.0"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
@@ -401,7 +440,9 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     author_label = f"@{author}" if author and author != 'unknown' else "Link to Tweet"
 
     safe_text = html.escape(next_item['text'][:800])
-    caption = f"{badge_header}{safe_text}\n\n<a href='{next_item['tweet_url']}'>{author_label}</a>\n\n<code>{VERSION}</code>"
+    src_num = next_item.get('source_list_num')
+    list_label = f" • <i>List {src_num}</i>" if src_num else ""
+    caption = f"{badge_header}{safe_text}\n\n<a href='{next_item['tweet_url']}'>{author_label}</a>{list_label}\n\n<code>{VERSION}</code>"
     
     status_msg = await context.bot.send_message(chat_id=chat_id, text="Loading next item...")
     temp_path = None
@@ -523,6 +564,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Welcome to the Twitter Curator Bot!\n\n"
         "Commands:\n"
         "/scrape - Force a manual scrape\n"
+        "/lists - View & switch between your 2 Twitter lists\n"
+        "/list1 [url] - Switch to or set List 1\n"
+        "/list2 [url] - Switch to or set List 2\n"
+        "/switchlist - Quick toggle between List 1 & List 2\n"
         "/next - Manually curate the queue\n"
         "/drip <minutes> - Auto-send media on a schedule\n"
         "/stopdrip - Stop auto-sending"
@@ -540,10 +585,10 @@ is_filling = False
 
 
 async def auto_scrape_job(context: ContextTypes.DEFAULT_TYPE):
-    global tweet_queue, history, unreviewed_count, custom_list_url, bot_stats
+    global tweet_queue, history, unreviewed_count, bot_stats
     if len(tweet_queue) >= 30:
         return
-    active_url = custom_list_url if custom_list_url else config['twitter_list_url']
+    active_url = get_active_list_url()
     if not active_url:
         return
     list_id = active_url.rstrip('/').split('/')[-1]
@@ -556,6 +601,8 @@ async def auto_scrape_job(context: ContextTypes.DEFAULT_TYPE):
         count = 0
         added_items = []
         for item in items:
+            item['source_list'] = f"List {active_list}"
+            item['source_list_num'] = active_list
             url = item['url']
             if url not in history_set and url not in queue_urls:
                 added_items.append(item)
@@ -567,7 +614,7 @@ async def auto_scrape_job(context: ContextTypes.DEFAULT_TYPE):
             if len(history) > 8000:
                 history = history[-8000:]
             save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"queue", "history"})
-            print(f"Auto-scrape completed: found {count} new items.")
+            print(f"Auto-scrape completed: found {count} new items from List {active_list}.")
     except Exception as e:
         print(f"Auto-scrape failed: {e}")
 async def fill_buffer(chat_id, context: ContextTypes.DEFAULT_TYPE):
@@ -597,11 +644,12 @@ async def version_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(VERSION)
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global tweet_queue, unreviewed_count, media_filter
+    global tweet_queue, unreviewed_count, media_filter, active_list
     msg = f"📊 *Bot Status*\n\n"
     msg += f"📦 Queue: {len(tweet_queue)} items\n"
     msg += f"👀 Unreviewed Buffer: {unreviewed_count}\n"
     msg += f"🎛️ Active Filter: {media_filter}\n"
+    msg += f"📋 Active List: List {active_list} ({get_active_list_url()})\n"
     msg += f"🤖 Version: {VERSION}"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -647,14 +695,100 @@ async def filter_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📦 Filter set: All media")
 
 
+async def lists_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global list1_url, list2_url, active_list
+    l1_disp = list1_url if list1_url else "Not configured"
+    l2_disp = list2_url if list2_url else "Not configured (set with /list2 <url>)"
+    
+    msg = "📋 <b>Twitter Lists</b>\n\n"
+    msg += f"1️⃣ <b>List 1:</b> {l1_disp} {'<b>[ACTIVE ✅]</b>' if active_list == '1' else ''}\n\n"
+    msg += f"2️⃣ <b>List 2:</b> {l2_disp} {'<b>[ACTIVE ✅]</b>' if active_list == '2' else ''}\n\n"
+    msg += f"Current scraping source: <b>List {active_list}</b>\n\n"
+    msg += "<i>Commands:</i>\n"
+    msg += "• <code>/list1 [url]</code>\n"
+    msg += "• <code>/list2 [url]</code>\n"
+    msg += "• <code>/switchlist</code> (toggle)"
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ List 1" if active_list == "1" else "▶️ Switch to List 1", callback_data="switch_list:1"),
+            InlineKeyboardButton("✅ List 2" if active_list == "2" else "▶️ Switch to List 2", callback_data="switch_list:2"),
+        ],
+        [
+            InlineKeyboardButton("🔄 Scrape Active List", callback_data="scrape_active")
+        ]
+    ]
+    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+async def list1_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global list1_url, active_list, custom_list_url
+    if context.args:
+        list1_url = context.args[0]
+        active_list = "1"
+        save_lists()
+        custom_list_url = get_active_list_url()
+        await update.message.reply_text(f"✅ <b>List 1</b> updated and set as ACTIVE!\n🔗 {list1_url}", parse_mode="HTML")
+    else:
+        active_list = "1"
+        save_lists()
+        custom_list_url = get_active_list_url()
+        await update.message.reply_text(f"✅ Switched to <b>List 1</b> (ACTIVE)\n🔗 {list1_url or 'None'}", parse_mode="HTML")
+
+async def list2_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global list2_url, active_list, custom_list_url
+    if context.args:
+        list2_url = context.args[0]
+        active_list = "2"
+        save_lists()
+        custom_list_url = get_active_list_url()
+        await update.message.reply_text(f"✅ <b>List 2</b> updated and set as ACTIVE!\n🔗 {list2_url}", parse_mode="HTML")
+    else:
+        if not list2_url:
+            await update.message.reply_text("⚠️ List 2 URL is not set yet! Use:\n<code>/list2 &lt;twitter_list_url&gt;</code> to set it.", parse_mode="HTML")
+            return
+        active_list = "2"
+        save_lists()
+        custom_list_url = get_active_list_url()
+        await update.message.reply_text(f"✅ Switched to <b>List 2</b> (ACTIVE)\n🔗 {list2_url}", parse_mode="HTML")
+
+async def switchlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global active_list, list1_url, list2_url, custom_list_url
+    if active_list == "1":
+        if not list2_url:
+            await update.message.reply_text("⚠️ Cannot switch to List 2 because it isn't set yet! Set it with:\n<code>/list2 &lt;twitter_list_url&gt;</code>", parse_mode="HTML")
+            return
+        active_list = "2"
+    else:
+        active_list = "1"
+    save_lists()
+    custom_list_url = get_active_list_url()
+    await update.message.reply_text(f"🔀 Switched active source to <b>List {active_list}</b>\n🔗 {custom_list_url}", parse_mode="HTML")
+
 async def setlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global custom_list_url
+    global custom_list_url, list1_url, list2_url, active_list
     if not context.args:
-        await update.message.reply_text("Usage: /setlist <twitter_list_url>")
+        await update.message.reply_text("Usage:\n/setlist <twitter_list_url> (updates active list)\n/setlist 1 <url> (updates List 1)\n/setlist 2 <url> (updates List 2)")
         return
-    custom_list_url = context.args[0]
-    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"custom_list_url"})
-    await update.message.reply_text(f"✅ List updated! Next scrape will use: {custom_list_url}")
+    
+    if len(context.args) >= 2 and context.args[0] in ("1", "2"):
+        target_num = context.args[0]
+        url = context.args[1]
+        if target_num == "1":
+            list1_url = url
+            active_list = "1"
+        else:
+            list2_url = url
+            active_list = "2"
+    else:
+        url = context.args[0]
+        if active_list == "2":
+            list2_url = url
+        else:
+            list1_url = url
+            
+    custom_list_url = get_active_list_url()
+    save_lists()
+    await update.message.reply_text(f"✅ List {active_list} updated! Next scrape will use:\n{custom_list_url}")
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global bot_stats
@@ -782,6 +916,47 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=query.message.chat_id, text="⏸️ Paused! (Auto-drip stopped). The video above is safely in your chat history—just Love/Skip it when you're ready to continue.")
         return
 
+    elif action.startswith("switch_list:"):
+        target = action.split(":")[1]
+        if target == "2" and not list2_url:
+            await query.answer("List 2 is not configured yet! Use /list2 <url>", show_alert=True)
+            return
+        active_list = target
+        save_lists()
+        custom_list_url = get_active_list_url()
+        await query.answer(f"Switched to List {active_list}!")
+        l1_disp = list1_url if list1_url else "Not configured"
+        l2_disp = list2_url if list2_url else "Not configured (set with /list2 <url>)"
+        msg = "📋 <b>Twitter Lists</b>\n\n"
+        msg += f"1️⃣ <b>List 1:</b> {l1_disp} {'<b>[ACTIVE ✅]</b>' if active_list == '1' else ''}\n\n"
+        msg += f"2️⃣ <b>List 2:</b> {l2_disp} {'<b>[ACTIVE ✅]</b>' if active_list == '2' else ''}\n\n"
+        msg += f"Current scraping source: <b>List {active_list}</b>\n\n"
+        msg += "<i>Commands:</i>\n"
+        msg += "• <code>/list1 [url]</code>\n"
+        msg += "• <code>/list2 [url]</code>\n"
+        msg += "• <code>/switchlist</code> (toggle)"
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ List 1" if active_list == "1" else "▶️ Switch to List 1", callback_data="switch_list:1"),
+                InlineKeyboardButton("✅ List 2" if active_list == "2" else "▶️ Switch to List 2", callback_data="switch_list:2"),
+            ],
+            [
+                InlineKeyboardButton("🔄 Scrape Active List", callback_data="scrape_active")
+            ]
+        ]
+        try:
+            await query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        except Exception:
+            pass
+        return
+
+    elif action == "scrape_active":
+        await query.answer("Starting scrape...")
+        await do_scrape(context, query.message.chat_id)
+        if tweet_queue:
+            asyncio.ensure_future(fill_buffer(query.message.chat_id, context))
+        return
+
     # Automatically fill the buffer back up to 5 as a background task
     asyncio.ensure_future(fill_buffer(query.message.chat_id, context))
 
@@ -794,7 +969,11 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 async def post_init(application: Application):
     application.job_queue.run_repeating(auto_scrape_job, interval=3600, first=60)
     await application.bot.set_my_commands([
-        ("setlist", "Switch Twitter List URL"),
+        ("lists", "View and switch between your 2 Twitter lists"),
+        ("list1", "Switch to or set List 1 (e.g. /list1 or /list1 <url>)"),
+        ("list2", "Switch to or set List 2 (e.g. /list2 or /list2 <url>)"),
+        ("switchlist", "Toggle between List 1 and List 2"),
+        ("setlist", "Switch or set Twitter List URL"),
         ("purgequeue", "Delete everything in the queue"),
         ("stats", "View lifetime curation stats"),
         ("next", "Load the next item in the queue"),
@@ -824,6 +1003,13 @@ def main():
     app = ApplicationBuilder().token(config['telegram_bot_token']).read_timeout(60.0).write_timeout(60.0).connect_timeout(60.0).pool_timeout(60.0).post_init(post_init).build()
     
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("lists", lists_command))
+    app.add_handler(CommandHandler("list1", list1_command))
+    app.add_handler(CommandHandler("l1", list1_command))
+    app.add_handler(CommandHandler("list2", list2_command))
+    app.add_handler(CommandHandler("l2", list2_command))
+    app.add_handler(CommandHandler("switchlist", switchlist_command))
+    app.add_handler(CommandHandler("switch", switchlist_command))
     app.add_handler(CommandHandler("purgequeue", purgequeue_command))
     app.add_handler(CommandHandler("setlist", setlist_command))
     app.add_handler(CommandHandler("stats", stats_command))

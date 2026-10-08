@@ -8,6 +8,8 @@ interface OverlayControlsProps {
   item: MediaItem;
   queueCount: number;
   isMuted: boolean;
+  activeList?: string;
+  onSwitchList?: (listNum: '1' | '2') => void;
   onToggleMute: () => void;
   onLike: () => void;
   onSkip: () => void;
@@ -17,6 +19,8 @@ export function OverlayControls({
   item,
   queueCount,
   isMuted,
+  activeList,
+  onSwitchList,
   onToggleMute,
   onLike,
   onSkip,
@@ -36,7 +40,38 @@ export function OverlayControls({
   return (
     <div className="absolute inset-0 pointer-events-none z-30 flex flex-col justify-between p-4 md:p-6">
       {/* Top Bar */}
-      <div className="flex justify-end pointer-events-auto">
+      <div className="flex justify-between items-center pointer-events-auto">
+        {onSwitchList ? (
+          <div className="flex items-center bg-black/60 backdrop-blur-md rounded-full p-1 border border-white/10 shadow-lg text-xs font-semibold">
+            <button
+              onClick={e => {
+                e.stopPropagation();
+                onSwitchList('1');
+              }}
+              className={`px-3 py-1 rounded-full transition-all ${
+                activeList === '1'
+                  ? 'bg-white text-black font-bold shadow'
+                  : 'text-white/70 hover:text-white'
+              }`}
+            >
+              List 1
+            </button>
+            <button
+              onClick={e => {
+                e.stopPropagation();
+                onSwitchList('2');
+              }}
+              className={`px-3 py-1 rounded-full transition-all ${
+                activeList === '2'
+                  ? 'bg-white text-black font-bold shadow'
+                  : 'text-white/70 hover:text-white'
+              }`}
+            >
+              List 2
+            </button>
+          </div>
+        ) : <div />}
+
         <button
           onClick={e => {
             e.stopPropagation();
@@ -64,6 +99,9 @@ export function OverlayControls({
               <ExternalLink className="w-3.5 h-3.5 opacity-70" />
             </a>
             <span className="text-xs text-white/40">• {queueCount} left</span>
+            {item.source_list_num && (
+              <span className="text-xs text-white/40">• List {item.source_list_num}</span>
+            )}
           </div>
 
           <p
