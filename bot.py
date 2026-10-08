@@ -375,7 +375,7 @@ async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
         if len(history) > 8000:
             history = history[-8000:]
         
-        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats)
+        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"queue", "history"})
         await context.bot.send_message(chat_id=chat_id, text=f"✅ Scraped {len(items)} posts from List {active_list}, found {count} brand new ones! Total in queue: {len(tweet_queue)}")
     except Exception as e:
         if "cookies" in str(e).lower() or "expired" in str(e).lower():
@@ -392,7 +392,7 @@ async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global unreviewed_count
     history.clear()
     unreviewed_count = 0
-    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats)
+    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"history", "unreviewed_count"})
     await update.message.reply_text("🗑️ History cleared! The scraper will now re-fetch older tweets as if they were brand new.")
 
 # Reuse TCP connections
@@ -428,7 +428,7 @@ async def upload_to_gofile(filepath, filename="video.mp4"):
         
     return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.13.0"
+VERSION = "v1.13.1"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
@@ -738,7 +738,7 @@ async def auto_scrape_job(context: ContextTypes.DEFAULT_TYPE):
             print(f"Auto-scrape completed: found {count} new items from List {active_list}.")
     except Exception as e:
         print(f"Auto-scrape failed: {e}")
-async def fill_buffer(chat_id, context: ContextTypes.DEFAULT_TYPE):
+async def fill_buffer(chat_id, context: ContextTypes.DEFAULT_TYPE, notify_if_empty=False):
     global unreviewed_count, is_filling
     
     # Don't auto-fill if a drip feed is actively running for this chat
@@ -748,6 +748,17 @@ async def fill_buffer(chat_id, context: ContextTypes.DEFAULT_TYPE):
             
     if is_filling:
         return
+
+    if not tweet_queue:
+        if notify_if_empty:
+            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ The queue is empty! Run /scrape to fetch fresh posts from List {active_list}.")
+        return
+
+    if unreviewed_count >= 5:
+        if notify_if_empty:
+            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ You already have {unreviewed_count} unreviewed posts waiting in chat! Review or skip them first, or use /setcounter 0 to reset.")
+        return
+
     is_filling = True
     try:
         while unreviewed_count < 5 and tweet_queue:
@@ -759,7 +770,7 @@ async def fill_buffer(chat_id, context: ContextTypes.DEFAULT_TYPE):
         is_filling = False
 
 async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    asyncio.ensure_future(fill_buffer(update.message.chat_id, context))
+    asyncio.ensure_future(fill_buffer(update.message.chat_id, context, notify_if_empty=True))
 
 async def version_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(VERSION)
@@ -791,12 +802,25 @@ async def set_counter_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def purgequeue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global tweet_queue, unreviewed_count
+    global tweet_queue, unreviewed_count, history
+    purged_urls = set()
+    for item in tweet_queue:
+        if item.get('url'):
+            purged_urls.add(item['url'])
+        if item.get('urls'):
+            for u in item['urls']:
+                purged_urls.add(u)
+        if item.get('tweet_url'):
+            purged_urls.add(item['tweet_url'])
+
+    if purged_urls:
+        history = [h for h in history if h not in purged_urls]
+
     length = len(tweet_queue)
     tweet_queue.clear()
     unreviewed_count = 0
-    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"queue", "unreviewed_count"})
-    await update.message.reply_text(f"🗑️ Queue purged! Deleted {length} pending items.")
+    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"queue", "history", "unreviewed_count"})
+    await update.message.reply_text(f"🗑️ Queue purged! Deleted {length} pending items and freed them to be re-scraped.")
 async def filter_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global media_filter, tweet_queue, history, unreviewed_count
     media_filter = "photo"
