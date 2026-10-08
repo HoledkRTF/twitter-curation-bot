@@ -2,9 +2,10 @@ import json
 import os
 import html
 import asyncio
+import re
 import httpx
 import tempfile
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from apify_client import ApifyClient
 
@@ -235,30 +236,63 @@ async def extract_media_from_twitter(list_id):
                             if 'retweeted_status_result' in tweet and not include_retweets:
                                 continue # Skip retweets unless /rt on is set
                                 
+                            # Clean trailing t.co attachment links
+                            tweet_text = re.sub(r'\s*https://t\.co/[a-zA-Z0-9]+$', '', tweet_text).strip()
+                                
                             media = tweet.get('extended_entities', {}).get('media', [])
                             
-                            for m in media:
+                            photos = [m for m in media if m.get('type') == 'photo']
+                            videos = [m for m in media if m.get('type') in ['video', 'animated_gif']]
+                            
+                            if len(photos) > 1:
+                                photo_urls = [m.get('media_url_https') for m in photos if m.get('media_url_https')]
+                                if photo_urls:
+                                    album_obj = {
+                                        'tweet_url': tweet_url,
+                                        'text': tweet_text,
+                                        'screen_name': screen_name,
+                                        'type': 'album',
+                                        'urls': photo_urls,
+                                        'url': photo_urls[0],
+                                    }
+                                    orig = photos[0].get('original_info', {})
+                                    if orig.get('width') and orig.get('height'):
+                                        album_obj['width'] = orig['width']
+                                        album_obj['height'] = orig['height']
+                                    extracted_items.append(album_obj)
+                            elif len(photos) == 1:
+                                m = photos[0]
+                                media_obj = {
+                                    'tweet_url': tweet_url,
+                                    'text': tweet_text,
+                                    'screen_name': screen_name,
+                                    'type': 'photo',
+                                    'url': m['media_url_https'],
+                                    'urls': [m['media_url_https']],
+                                }
+                                orig = m.get('original_info', {})
+                                if orig.get('width') and orig.get('height'):
+                                    media_obj['width'] = orig['width']
+                                    media_obj['height'] = orig['height']
+                                extracted_items.append(media_obj)
+                                
+                            for m in videos:
                                 media_obj = {'tweet_url': tweet_url, 'text': tweet_text, 'screen_name': screen_name}
                                 original_info = m.get('original_info', {})
                                 if original_info.get('width') and original_info.get('height'):
                                     media_obj['width'] = original_info['width']
                                     media_obj['height'] = original_info['height']
                                     
-                                if m.get('type') in ['video', 'animated_gif']:
-                                    v_info = m.get('video_info', {})
-                                    if v_info.get('duration_millis'):
-                                        media_obj['duration_millis'] = v_info['duration_millis']
-                                    variants = v_info.get('variants', [])
-                                    mp4s = [v for v in variants if v.get('content_type') == 'video/mp4']
-                                    if mp4s:
-                                        sorted_mp4s = sorted(mp4s, key=lambda x: x.get('bitrate', 0), reverse=True)
-                                        media_obj['urls'] = [v['url'] for v in sorted_mp4s]
-                                        media_obj['url'] = sorted_mp4s[0]['url'] # Keep primary for backwards compatibility
-                                        media_obj['type'] = 'video'
-                                        extracted_items.append(media_obj)
-                                elif m.get('type') == 'photo':
-                                    media_obj['url'] = m['media_url_https']
-                                    media_obj['type'] = 'photo'
+                                v_info = m.get('video_info', {})
+                                if v_info.get('duration_millis'):
+                                    media_obj['duration_millis'] = v_info['duration_millis']
+                                variants = v_info.get('variants', [])
+                                mp4s = [v for v in variants if v.get('content_type') == 'video/mp4']
+                                if mp4s:
+                                    sorted_mp4s = sorted(mp4s, key=lambda x: x.get('bitrate', 0), reverse=True)
+                                    media_obj['urls'] = [v['url'] for v in sorted_mp4s]
+                                    media_obj['url'] = sorted_mp4s[0]['url'] # Keep primary for backwards compatibility
+                                    media_obj['type'] = 'video'
                                     extracted_items.append(media_obj)
                                         
             # If we didn't get a new cursor, or we have 500+ items, stop paginating
@@ -373,7 +407,7 @@ async def upload_to_gofile(filepath, filename="video.mp4"):
         
     return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.12.0"
+VERSION = "v1.13.0"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not tweet_queue:
@@ -392,7 +426,7 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
         elif media_filter == "video" and item.get('type') == 'video':
             match_index = i
             break
-        elif media_filter == "photo" and item.get('type') == 'photo':
+        elif media_filter == "photo" and item.get('type') in ['photo', 'album']:
             match_index = i
             break
             
@@ -445,6 +479,54 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     caption = f"{badge_header}{safe_text}\n\n<a href='{next_item['tweet_url']}'>{author_label}</a>{list_label}\n\n<code>{VERSION}</code>"
     
     status_msg = await context.bot.send_message(chat_id=chat_id, text="Loading next item...")
+    
+    if next_item.get('type') == 'album':
+        photo_urls = next_item.get('urls', [next_item['url']])
+        temp_paths = []
+        open_files = []
+        try:
+            input_media = []
+            for idx, p_url in enumerate(photo_urls):
+                p_path = await fetch_media_to_temp(p_url, 'photo')
+                temp_paths.append(p_path)
+                f_handle = open(p_path, 'rb')
+                open_files.append(f_handle)
+                if idx == 0:
+                    input_media.append(InputMediaPhoto(media=f_handle, caption=caption, parse_mode="HTML"))
+                else:
+                    input_media.append(InputMediaPhoto(media=f_handle))
+            
+            media_msgs = await context.bot.send_media_group(chat_id=chat_id, media=input_media)
+            next_item['album_message_ids'] = [m.message_id for m in media_msgs]
+            
+            control_text = f"📸 <b>Album ({len(photo_urls)} photos)</b> • Choose action:"
+            ctrl_msg = await context.bot.send_message(chat_id=chat_id, text=control_text, reply_markup=reply_markup, parse_mode="HTML")
+            review_dict[ctrl_msg.message_id] = next_item
+            unreviewed_count += 1
+            save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"queue", "unreviewed_count"})
+            await status_msg.delete()
+            return True
+        except Exception as e:
+            print(f"Error sending album: {e}")
+            fallback_msg = f"⚠️ <b>Album sending failed ({e}).</b>\n🔗 <a href='{next_item['url']}'>Direct Media Link</a>\n\n{caption}"
+            ctrl_msg = await status_msg.edit_text(text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
+            review_dict[ctrl_msg.message_id] = next_item
+            unreviewed_count += 1
+            save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"queue", "unreviewed_count"})
+            return True
+        finally:
+            for fh in open_files:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+            for tp in temp_paths:
+                if tp and os.path.exists(tp):
+                    try:
+                        os.remove(tp)
+                    except Exception:
+                        pass
+                        
     temp_path = None
     try:
         urls_to_try = next_item.get('urls', [next_item['url']])
@@ -871,17 +953,54 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("Error: You haven't set a Channel ID yet! Use /channel <id>")
             return
             
-        try:
-            await context.bot.copy_message(
-                chat_id=channel_id,
-                from_chat_id=query.message.chat_id,
-                message_id=query.message.message_id
-            )
-        except Exception as e:
-            # Message may have already been deleted — still count it as reviewed
-            print(f"Copy to channel failed: {e}")
+        item = review_dict.get(query.message.message_id)
+        if item and item.get('type') == 'album':
+            copied = False
+            if item.get('album_message_ids'):
+                try:
+                    await context.bot.copy_messages(
+                        chat_id=channel_id,
+                        from_chat_id=query.message.chat_id,
+                        message_ids=item['album_message_ids']
+                    )
+                    copied = True
+                except Exception as e:
+                    print(f"Copy messages failed for album: {e}")
+            if not copied:
+                try:
+                    photo_urls = item.get('urls', [item.get('url')])
+                    caption_text = html.escape(item.get('text', '')[:800])
+                    author = item.get('screen_name', 'unknown')
+                    author_label = f"@{author}" if author != 'unknown' else "Link to Tweet"
+                    src_num = item.get('source_list_num')
+                    list_label = f" • <i>List {src_num}</i>" if src_num else ""
+                    cap = f"{caption_text}\n\n<a href='{item.get('tweet_url')}'>{author_label}</a>{list_label}"
+                    input_media = [
+                        InputMediaPhoto(media=u, caption=cap, parse_mode="HTML")
+                        if i == 0 else InputMediaPhoto(media=u)
+                        for i, u in enumerate(photo_urls)
+                    ]
+                    await context.bot.send_media_group(chat_id=channel_id, media=input_media)
+                except Exception as e:
+                    print(f"Direct album send to channel failed: {e}")
+        else:
+            try:
+                await context.bot.copy_message(
+                    chat_id=channel_id,
+                    from_chat_id=query.message.chat_id,
+                    message_id=query.message.message_id
+                )
+            except Exception as e:
+                # Message may have already been deleted — still count it as reviewed
+                print(f"Copy to channel failed: {e}")
         
         await cleanup_reviewed_message(query, "like")
+        if item and item.get('album_message_ids'):
+            for mid in item['album_message_ids']:
+                try:
+                    await context.bot.delete_message(chat_id=query.message.chat_id, message_id=mid)
+                except Exception:
+                    pass
         review_dict.pop(query.message.message_id, None)
         unreviewed_count = max(0, unreviewed_count - 1)
         save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"bot_stats", "unreviewed_count"})
@@ -892,6 +1011,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         item = review_dict.pop(query.message.message_id, None)
         if item:
             last_skipped = item
+            if item.get('album_message_ids'):
+                for mid in item['album_message_ids']:
+                    try:
+                        await context.bot.delete_message(chat_id=query.message.chat_id, message_id=mid)
+                    except Exception:
+                        pass
             
         await cleanup_reviewed_message(query, "skip")
         unreviewed_count = max(0, unreviewed_count - 1)
