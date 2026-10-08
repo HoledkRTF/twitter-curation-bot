@@ -48,7 +48,28 @@ def load_data():
     if store_client:
         q_rec = store_client.get_record("queue")
         if q_rec and q_rec.get('value'):
-            tweet_queue = q_rec['value']
+            raw_queue = q_rec['value']
+            seen_tweets = {}
+            coalesced = []
+            for it in raw_queue:
+                t_url = it.get('tweet_url')
+                if it.get('type') in ['photo', 'album'] and t_url:
+                    if t_url in seen_tweets:
+                        ex = seen_tweets[t_url]
+                        ex['type'] = 'album'
+                        e_urls = ex.setdefault('urls', [ex['url']])
+                        for x in it.get('urls', [it.get('url')]):
+                            if x and x not in e_urls:
+                                e_urls.append(x)
+                    else:
+                        cloned = dict(it)
+                        if cloned.get('text'):
+                            cloned['text'] = re.sub(r'\s*https://t\.co/[a-zA-Z0-9]+$', '', cloned['text']).strip()
+                        seen_tweets[t_url] = cloned
+                        coalesced.append(cloned)
+                else:
+                    coalesced.append(it)
+            tweet_queue = coalesced
             
         h_rec = store_client.get_record("history")
         if h_rec and h_rec.get('value'):
@@ -436,6 +457,24 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
         return False
 
     next_item = tweet_queue.pop(match_index)
+    
+    # Merge any sibling photos for this tweet still in tweet_queue
+    if next_item.get('type') in ['photo', 'album'] and next_item.get('tweet_url'):
+        same_items = [it for it in tweet_queue if it.get('tweet_url') == next_item['tweet_url'] and it.get('type') in ['photo', 'album']]
+        if same_items:
+            tweet_queue = [it for it in tweet_queue if not (it.get('tweet_url') == next_item['tweet_url'] and it.get('type') in ['photo', 'album'])]
+            next_item['type'] = 'album'
+            urls = next_item.setdefault('urls', [next_item['url']])
+            for it in same_items:
+                it_urls = it.get('urls', [it.get('url')])
+                for u in it_urls:
+                    if u and u not in urls:
+                        urls.append(u)
+                        
+    # Strip trailing t.co attachment links from caption if present
+    if next_item.get('text'):
+        next_item['text'] = re.sub(r'\s*https://t\.co/[a-zA-Z0-9]+$', '', next_item['text']).strip()
+
     save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"queue"})
     
     keyboard = [

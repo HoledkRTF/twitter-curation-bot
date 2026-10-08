@@ -20,7 +20,12 @@ export async function GET() {
     const stats = (sRec?.value as unknown as BotStats) || { loved: 0, skipped: 0 };
     const mediaFilter = (fRec?.value as unknown as string) || 'all';
 
-    const filteredQueue = mediaFilter !== 'all' ? queue.filter(item => item.type === mediaFilter) : queue;
+    const filteredQueue =
+      mediaFilter === 'all'
+        ? queue
+        : mediaFilter === 'photo'
+        ? queue.filter(item => item.type === 'photo' || item.type === 'album')
+        : queue.filter(item => item.type === 'video');
 
     return NextResponse.json({
       queue: filteredQueue,
