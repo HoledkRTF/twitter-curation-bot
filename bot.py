@@ -9,7 +9,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMe
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from apify_client import ApifyClient
 
-# Config from environment variables
+# Config from environment variables, falling back to config.json if present
 config = {
     'telegram_bot_token': os.environ.get('TELEGRAM_BOT_TOKEN', ''),
     'telegram_channel_id': os.environ.get('TELEGRAM_CHANNEL_ID', ''),
@@ -19,8 +19,18 @@ config = {
     'twitter_ct0': os.environ.get('TWITTER_CT0', '')
 }
 
-PORT = int(os.environ.get('PORT', 10000))
-RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL', '')
+if os.path.exists('config.json'):
+    try:
+        with open('config.json', 'r') as f:
+            cfg_file = json.load(f)
+            for k, v in cfg_file.items():
+                if not config.get(k):
+                    config[k] = v
+    except Exception as e:
+        print(f"Failed to load config.json fallback: {e}")
+
+PORT = int(os.environ.get('PORT', 8000))
+PUBLIC_URL = os.environ.get('PUBLIC_URL') or os.environ.get('KOYEB_PUBLIC_URL') or os.environ.get('RENDER_EXTERNAL_URL', '')
 
 apify_client = ApifyClient(config['apify_api_token'])
 
@@ -442,7 +452,7 @@ async def upload_to_gofile(filepath, filename="video.mp4"):
         
     return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.13.4"
+VERSION = "v1.14.0"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     global tweet_queue, history, unreviewed_count, bot_stats
@@ -1279,17 +1289,19 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL, channel_post_handler))
     
-    webhook_url = f"{RENDER_URL}/{config['telegram_bot_token']}"
-    
-    print(f"Starting webhook on port {PORT}...")
-    print(f"Webhook URL: {webhook_url}")
-    
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=config['telegram_bot_token'],
-        webhook_url=webhook_url,
-    )
+    if PUBLIC_URL:
+        webhook_url = f"{PUBLIC_URL.rstrip('/')}/{config['telegram_bot_token']}"
+        print(f"Starting webhook on port {PORT}...")
+        print(f"Webhook URL: {webhook_url}")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=config['telegram_bot_token'],
+            webhook_url=webhook_url,
+        )
+    else:
+        print("PUBLIC_URL not configured. Running in polling mode...")
+        app.run_polling(drop_pending_updates=False)
 
 if __name__ == '__main__':
     main()
