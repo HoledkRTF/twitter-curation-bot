@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+huggingface_token.txt
+zeabur_token.txt
+secrets.json
+.env
+dump.json
+test_*.py
+get_js.py
+check_kv.py
+update_render.py
+web/.next/
+web/node_modules/

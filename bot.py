@@ -452,7 +452,7 @@ async def upload_to_gofile(filepath, filename="video.mp4"):
         
     return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.14.0"
+VERSION = "v1.14.1"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     global tweet_queue, history, unreviewed_count, bot_stats
@@ -544,19 +544,13 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     
     if next_item.get('type') == 'album':
         photo_urls = next_item.get('urls', [next_item['url']])
-        temp_paths = []
-        open_files = []
         try:
             input_media = []
             for idx, p_url in enumerate(photo_urls):
-                p_path = await fetch_media_to_temp(p_url, 'photo')
-                temp_paths.append(p_path)
-                f_handle = open(p_path, 'rb')
-                open_files.append(f_handle)
                 if idx == 0:
-                    input_media.append(InputMediaPhoto(media=f_handle, caption=caption, parse_mode="HTML"))
+                    input_media.append(InputMediaPhoto(media=p_url, caption=caption, parse_mode="HTML"))
                 else:
-                    input_media.append(InputMediaPhoto(media=f_handle))
+                    input_media.append(InputMediaPhoto(media=p_url))
             
             media_msgs = await context.bot.send_media_group(chat_id=chat_id, media=input_media)
             next_item['album_message_ids'] = [m.message_id for m in media_msgs]
@@ -575,92 +569,74 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.delete()
             return True
         except Exception as e:
-            print(f"Error sending album: {e}")
+            print(f"Error sending album via URL: {e}")
             fallback_msg = f"⚠️ <b>Album sending failed ({e}).</b>\n🔗 <a href='{next_item['url']}'>Direct Media Link</a>\n\n{caption}"
             ctrl_msg = await status_msg.edit_text(text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
             review_dict[str(ctrl_msg.message_id)] = next_item
             unreviewed_count += 1
             save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, review_dict, keys={"queue", "unreviewed_count", "review_dict"})
             return True
-        finally:
-            for fh in open_files:
-                try:
-                    fh.close()
-                except Exception:
-                    pass
-            for tp in temp_paths:
-                if tp and os.path.exists(tp):
-                    try:
-                        os.remove(tp)
-                    except Exception:
-                        pass
-                        
-    temp_path = None
-    try:
+
+    elif next_item.get('type') == 'photo':
+        try:
+            msg = await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=next_item['url'],
+                caption=caption,
+                reply_markup=reply_markup,
+                parse_mode="HTML"
+            )
+            review_dict[str(msg.message_id)] = next_item
+            unreviewed_count += 1
+            save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, review_dict, keys={"queue", "unreviewed_count", "review_dict"})
+            await status_msg.delete()
+            return True
+        except Exception as e:
+            print(f"Direct photo send failed: {e}")
+            fallback_msg = f"⚠️ <b>Photo display failed ({e}).</b>\n🔗 <a href='{next_item['url']}'>Direct Photo Link</a>\n\n{caption}"
+            msg = await status_msg.edit_text(text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
+            review_dict[str(msg.message_id)] = next_item
+            unreviewed_count += 1
+            save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, review_dict, keys={"queue", "unreviewed_count", "review_dict"})
+            return True
+
+    elif next_item.get('type') == 'video':
         urls_to_try = next_item.get('urls', [next_item['url']])
+        sent_video = False
+        v_kwargs = {}
+        if next_item.get('width'): v_kwargs['width'] = next_item['width']
+        if next_item.get('height'): v_kwargs['height'] = next_item['height']
+        if next_item.get('duration_millis'): v_kwargs['duration'] = round(next_item['duration_millis'] / 1000)
         
-        temp_path = await fetch_media_to_temp(urls_to_try[0], next_item['type'])
-        file_size = os.path.getsize(temp_path)
-        
-        if file_size > 50_000_000:
-            await status_msg.edit_text("Uploading full-res to Gofile (too large for Telegram)...")
+        for u in urls_to_try:
             try:
-                gofile_link = await upload_to_gofile(temp_path)
-                caption += f"\n\n⚠️ <b>DOWNSCALED PREVIEW</b> (Original exceeds Telegram's 50MB limit)\n📥 <a href='{gofile_link}'>Download Full-Res (Gofile)</a>"
+                msg = await context.bot.send_video(
+                    chat_id=chat_id,
+                    video=u,
+                    caption=caption,
+                    reply_markup=reply_markup,
+                    parse_mode="HTML",
+                    **v_kwargs
+                )
+                sent_video = True
+                break
             except Exception as e:
-                print(f"Gofile upload failed: {e}")
-                caption += f"\n\n⚠️ <b>DOWNSCALED PREVIEW</b> (Original exceeds Telegram's 50MB limit, Gofile upload failed)"
+                print(f"Direct video URL send failed for {u}: {e}")
+                continue
                 
-            # Try to fetch smaller variants until one is < 50MB
-            success_downscale = False
-            for u in urls_to_try[1:]:
-                try:
-                    if temp_path and os.path.exists(temp_path):
-                        os.remove(temp_path)
-                    temp_path = await fetch_media_to_temp(u, next_item['type'])
-                    if os.path.getsize(temp_path) <= 50_000_000:
-                        success_downscale = True
-                        break
-                except Exception:
-                    continue
-                    
-            if not success_downscale:
-                fallback_msg = f"⚠️ <b>Video too large for Telegram natively (>50MB).</b>\n🔗 <a href='{next_item['url']}'>Direct Media Link</a>\n\n{caption}"
-                msg = await context.bot.send_message(chat_id=chat_id, text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
-                review_dict[str(msg.message_id)] = next_item
-                unreviewed_count += 1
-                save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, review_dict, keys={"queue", "unreviewed_count", "review_dict"})
-                await status_msg.delete()
-                return True
-                
-        with open(temp_path, 'rb') as f:
-            if next_item['type'] == 'photo':
-                msg = await context.bot.send_photo(chat_id=chat_id, photo=f, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
-            else:
-                v_kwargs = {}
-                if next_item.get('width'): v_kwargs['width'] = next_item['width']
-                if next_item.get('height'): v_kwargs['height'] = next_item['height']
-                msg = await context.bot.send_video(chat_id=chat_id, video=f, caption=caption, reply_markup=reply_markup, parse_mode="HTML", **v_kwargs)
-            
-        review_dict[str(msg.message_id)] = next_item
-        unreviewed_count += 1
-        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, review_dict, keys={"queue", "unreviewed_count", "review_dict"})
-        await status_msg.delete()
-        return True
-    except Exception as e:
-        print(f"Error downloading/sending media: {e}")
-        fallback_msg = f"⚠️ <b>Media download failed (Timeout/Error).</b>\n🔗 <a href='{next_item['url']}'>Direct Media Link</a>\n\n{caption}"
-        msg = await status_msg.edit_text(text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
-        review_dict[str(msg.message_id)] = next_item
-        unreviewed_count += 1
-        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, review_dict, keys={"queue", "unreviewed_count", "review_dict"})
-        return True
-    finally:
-        if temp_path and os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except Exception as e:
-                print(f"Failed to clean up temp file: {e}")
+        if sent_video:
+            review_dict[str(msg.message_id)] = next_item
+            unreviewed_count += 1
+            save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, review_dict, keys={"queue", "unreviewed_count", "review_dict"})
+            await status_msg.delete()
+            return True
+        else:
+            fallback_msg = f"⚠️ <b>Video exceeds Telegram's 20MB URL limit.</b>\n🔗 <a href='{next_item['tweet_url']}'>Watch on X</a> • <a href='{next_item['url']}'>Direct Media Link</a>\n\n{caption}"
+            msg = await status_msg.edit_text(text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
+            review_dict[str(msg.message_id)] = next_item
+            unreviewed_count += 1
+            save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, review_dict, keys={"queue", "unreviewed_count", "review_dict"})
+            return True
 
 async def drip_job(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
