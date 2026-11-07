@@ -63,6 +63,8 @@ def load_data():
             seen_tweets = {}
             coalesced = []
             for it in raw_queue:
+                if it.get('tweet_url') and '/unknown/' in it['tweet_url']:
+                    it['tweet_url'] = it['tweet_url'].replace('/unknown/', '/i/')
                 t_url = it.get('tweet_url')
                 if it.get('type') in ['photo', 'album'] and t_url:
                     if t_url in seen_tweets:
@@ -125,6 +127,9 @@ def load_data():
         rd_rec = store_client.get_record("review_dict")
         if rd_rec and rd_rec.get('value'):
             review_dict = {str(k): v for k, v in rd_rec['value'].items()}
+            for k, it in review_dict.items():
+                if isinstance(it, dict) and it.get('tweet_url') and '/unknown/' in it['tweet_url']:
+                    it['tweet_url'] = it['tweet_url'].replace('/unknown/', '/i/')
 
     if not list1_url:
         list1_url = config['twitter_list_url']
@@ -271,12 +276,18 @@ async def extract_media_from_twitter(list_id):
                         # Extract Tweet Data
                         if content.get('entryType') == 'TimelineTimelineItem':
                             result = content.get('itemContent', {}).get('tweet_results', {}).get('result', {})
-                            tweet = result.get('legacy', {})
-                            core = result.get('core', {}).get('user_results', {}).get('result', {}).get('legacy', {})
-                            screen_name = core.get('screen_name', 'unknown')
-                            tweet_id = tweet.get('id_str', '')
-                            tweet_url = f"https://vxtwitter.com/{screen_name}/status/{tweet_id}"
-                            tweet_text = tweet.get('full_text', '')
+                            tweet = result.get('tweet', result)
+                            legacy = tweet.get('legacy', {})
+                            user_res = tweet.get('core', {}).get('user_results', {}).get('result', {})
+                            u_core = user_res.get('core', {})
+                            u_legacy = user_res.get('legacy', {})
+                            screen_name = u_core.get('screen_name') or u_legacy.get('screen_name') or 'unknown'
+                            tweet_id = legacy.get('id_str') or tweet.get('rest_id', '')
+                            if screen_name and screen_name != 'unknown':
+                                tweet_url = f"https://x.com/{screen_name}/status/{tweet_id}"
+                            else:
+                                tweet_url = f"https://x.com/i/status/{tweet_id}"
+                            tweet_text = legacy.get('full_text', '')
                             
                             if 'retweeted_status_result' in tweet and not include_retweets:
                                 continue # Skip retweets unless /rt on is set
@@ -452,7 +463,7 @@ async def upload_to_gofile(filepath, filename="video.mp4"):
         
     return upload_res.json()['data']['downloadPage']
 
-VERSION = "v1.14.1"
+VERSION = "v1.15.0"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     global tweet_queue, history, unreviewed_count, bot_stats
@@ -608,6 +619,7 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
         if next_item.get('height'): v_kwargs['height'] = next_item['height']
         if next_item.get('duration_millis'): v_kwargs['duration'] = round(next_item['duration_millis'] / 1000)
         
+        # 1. First attempt: Zero-bandwidth direct URL passthrough
         for u in urls_to_try:
             try:
                 msg = await context.bot.send_video(
@@ -624,6 +636,41 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
                 print(f"Direct video URL send failed for {u}: {e}")
                 continue
                 
+        # 2. Second attempt: If URL send failed (>20MB URL limit), download and upload directly (up to 50MB)
+        if not sent_video:
+            for u in urls_to_try:
+                try:
+                    async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as dl_client:
+                        head = await dl_client.head(u)
+                        cl = int(head.headers.get('content-length', 0))
+                        if 0 < cl <= 50 * 1024 * 1024:
+                            resp = await dl_client.get(u)
+                            if resp.status_code == 200:
+                                with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tf:
+                                    tf.write(resp.content)
+                                    tf_path = tf.name
+                                try:
+                                    with open(tf_path, 'rb') as video_fp:
+                                        msg = await context.bot.send_video(
+                                            chat_id=chat_id,
+                                            video=video_fp,
+                                            caption=caption,
+                                            reply_markup=reply_markup,
+                                            parse_mode="HTML",
+                                            **v_kwargs
+                                        )
+                                    sent_video = True
+                                finally:
+                                    if os.path.exists(tf_path):
+                                        try:
+                                            os.remove(tf_path)
+                                        except Exception:
+                                            pass
+                                if sent_video:
+                                    break
+                except Exception as dl_err:
+                    print(f"Direct download & upload fallback failed for {u}: {dl_err}")
+
         if sent_video:
             review_dict[str(msg.message_id)] = next_item
             unreviewed_count += 1
@@ -631,7 +678,25 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.delete()
             return True
         else:
-            fallback_msg = f"⚠️ <b>Video exceeds Telegram's 20MB URL limit.</b>\n🔗 <a href='{next_item['tweet_url']}'>Watch on X</a> • <a href='{next_item['url']}'>Direct Media Link</a>\n\n{caption}"
+            t_url = next_item.get('tweet_url', '')
+            if '/unknown/' in t_url:
+                t_url = t_url.replace('/unknown/', '/i/')
+            if not t_url or 'status/' not in t_url:
+                t_url = f"https://x.com/i/status/{next_item.get('id', '')}"
+                
+            watch_x_url = t_url.replace('vxtwitter.com', 'x.com')
+            fxtwitter_url = t_url.replace('vxtwitter.com', 'fxtwitter.com')
+            if 'x.com' in fxtwitter_url:
+                fxtwitter_url = fxtwitter_url.replace('x.com', 'fxtwitter.com')
+            media_url = next_item.get('url', '')
+            
+            fallback_msg = (
+                f"⚠️ <b>Video exceeds Telegram's 50MB upload limit.</b>\n\n"
+                f"🔗 <a href='{watch_x_url}'>Watch on X</a> • "
+                f"<a href='{fxtwitter_url}'>Web Player (FxTwitter)</a> • "
+                f"<a href='{media_url}'>Direct MP4</a>\n\n"
+                f"{caption}"
+            )
             msg = await status_msg.edit_text(text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
             review_dict[str(msg.message_id)] = next_item
             unreviewed_count += 1
