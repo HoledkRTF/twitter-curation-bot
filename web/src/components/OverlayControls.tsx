@@ -29,13 +29,13 @@ export function OverlayControls({
 
   // Extract author username safely from screen_name or tweet_url
   let author = item.screen_name;
-  if (!author || author === 'unknown') {
+  if (!author || author === 'unknown' || author === 'i') {
     const parts = item.tweet_url?.split('/');
-    if (parts && parts.length >= 4 && parts[3] !== 'unknown') {
+    if (parts && parts.length >= 4 && parts[3] !== 'unknown' && parts[3] !== 'i') {
       author = parts[3];
     }
   }
-  const authorHandle = author && author !== 'unknown' ? `@${author}` : 'View Tweet';
+  const authorHandle = author && author !== 'unknown' && author !== 'i' ? `@${author}` : 'View Tweet';
 
   return (
     <div className="absolute inset-0 pointer-events-none z-30 flex flex-col justify-between p-4 md:p-6">

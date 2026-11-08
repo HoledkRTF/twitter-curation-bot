@@ -441,7 +441,7 @@ def get_http_client():
 
 # Dead gofile / temp helpers pruned for ponytail simplicity
 
-VERSION = "v1.16.0"
+VERSION = "v1.17.0"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     global tweet_queue, history, unreviewed_count, bot_stats
@@ -489,14 +489,25 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
 
     save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"queue"})
     
+    tweet_x_url = next_item.get('tweet_url', '')
+    if '/unknown/' in tweet_x_url:
+        tweet_x_url = tweet_x_url.replace('/unknown/', '/i/')
+    if not tweet_x_url or 'status/' not in tweet_x_url:
+        tweet_x_url = f"https://x.com/i/status/{next_item.get('id', '')}"
+    tweet_x_url = tweet_x_url.replace('vxtwitter.com', 'x.com')
+    if not tweet_x_url.startswith('http'):
+        tweet_x_url = f"https://x.com/i/status/{next_item.get('id', '')}"
+
+    row2 = [InlineKeyboardButton("⏸️ Pause", callback_data="pause")]
+    if tweet_x_url and tweet_x_url.startswith("http"):
+        row2.append(InlineKeyboardButton("🔗 View on X", url=tweet_x_url))
+
     keyboard = [
         [
-            InlineKeyboardButton("❤️ Love (Save to Channel)", callback_data="like"),
+            InlineKeyboardButton("❤️ Save", callback_data="like"),
             InlineKeyboardButton("👎 Skip", callback_data="skip")
         ],
-        [
-            InlineKeyboardButton("⏸️ Pause", callback_data="pause")
-        ]
+        row2
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -513,6 +524,8 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     h = next_item.get('height')
     if w and h and next_item.get('type') == 'video':
         badge_parts.append(f"{min(w, h)}p")
+
+    badge_parts.append(f"📦 {len(tweet_queue)} left")
         
     badge_header = f"<b>{' • '.join(badge_parts)}</b>\n\n" if badge_parts else ""
     
@@ -647,6 +660,10 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
                 
         # 2. Second attempt: If URL send failed (>20MB URL limit), stream-download and upload directly (up to 50MB)
         if not sent_video:
+            try:
+                await status_msg.edit_text("⏳ Uploading video to Telegram...")
+            except Exception:
+                pass
             client = get_http_client()
             for u in urls_to_try:
                 tf_path = None
@@ -1030,11 +1047,17 @@ async def setlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ List {active_list} updated! Next scrape will use:\n{custom_list_url}")
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global bot_stats
+    global bot_stats, tweet_queue
+    loved = bot_stats.get('loved', 0)
+    skipped = bot_stats.get('skipped', 0)
+    total = loved + skipped
+    rate = (loved / total * 100) if total > 0 else 0.0
     msg = f"📊 *Lifetime Curation Stats*\n\n"
-    msg += f"❤️ Loved: {bot_stats.get('loved', 0)}\n"
-    msg += f"🗑️ Skipped: {bot_stats.get('skipped', 0)}\n"
-    msg += f"🔍 Total Reviewed: {bot_stats.get('loved', 0) + bot_stats.get('skipped', 0)}\n"
+    msg += f"❤️ Loved: {loved}\n"
+    msg += f"🗑️ Skipped: {skipped}\n"
+    msg += f"🔍 Total Reviewed: {total}\n"
+    msg += f"✨ Love Rate: {rate:.1f}%\n"
+    msg += f"📦 Queue Remaining: {len(tweet_queue)}\n"
     await update.message.reply_text(msg, parse_mode="Markdown")
 async def setcookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global custom_cookies
@@ -1221,13 +1244,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     job.schedule_removal()
                     
             # Remove the pause button from this message to show it's paused
-            keyboard = [
-                [
-                    InlineKeyboardButton("❤️ Love (Save to Channel)", callback_data="like"),
-                    InlineKeyboardButton("👎 Skip", callback_data="skip")
+            new_keyboard = []
+            if query.message.reply_markup:
+                for row in query.message.reply_markup.inline_keyboard:
+                    new_row = [btn for btn in row if btn.callback_data != "pause"]
+                    if new_row:
+                        new_keyboard.append(new_row)
+            if not new_keyboard:
+                new_keyboard = [
+                    [
+                        InlineKeyboardButton("❤️ Save", callback_data="like"),
+                        InlineKeyboardButton("👎 Skip", callback_data="skip")
+                    ]
                 ]
-            ]
-            await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(new_keyboard))
                     
             await context.bot.send_message(chat_id=query.message.chat_id, text="⏸️ Paused! (Auto-drip stopped). The video above is safely in your chat history—just Love/Skip it when you're ready to continue.")
             return
