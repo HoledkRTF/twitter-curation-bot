@@ -366,57 +366,71 @@ async def extract_media_from_twitter(list_id):
                 
     return extracted_items
 
+_scrape_lock = None
+
+def get_scrape_lock():
+    global _scrape_lock
+    if _scrape_lock is None:
+        _scrape_lock = asyncio.Lock()
+    return _scrape_lock
+
 async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     global tweet_queue, history, unreviewed_count
-    await context.bot.send_message(chat_id=chat_id, text=f"🔄 Scraping Twitter List {active_list}...")
-    
-    try:
-        active_ct0 = custom_cookies.get('ct0') or config['twitter_ct0']
-        active_auth_token = custom_cookies.get('auth_token') or config['twitter_auth_token']
-        if not active_auth_token or not active_ct0:
-            await context.bot.send_message(chat_id=chat_id, text="Error: Missing Twitter cookies! Use /setcookies <auth_token> <ct0>")
-            return
-            
-        # Extract numeric list ID from active list URL
-        active_url = get_active_list_url()
-        if not active_url:
-            await context.bot.send_message(chat_id=chat_id, text=f"Error: No Twitter list URL configured for List {active_list}! Set it with /list{active_list} <url>")
-            return
-            
-        list_id = active_url.split('?')[0].split('#')[0].rstrip('/').split('/')[-1]
-        items = await extract_media_from_twitter(list_id)
+    lock = get_scrape_lock()
+    if lock.locked():
+        await context.bot.send_message(chat_id=chat_id, text="⏳ A scrape is already running in the background. Please wait for it to finish!")
+        return
+
+    async with lock:
+        await context.bot.send_message(chat_id=chat_id, text=f"🔄 Scraping Twitter List {active_list}...")
         
-        count = 0
-        added_items = []
-        
-        # Optimize O(N^2) list scan to O(1) lookups
-        history_set = set(history)
-        queue_urls = {q.get('url') for q in tweet_queue}
-        
-        for item in items:
-            item['source_list'] = f"List {active_list}"
-            item['source_list_num'] = active_list
-            url = item['url']
-            if url not in history_set and url not in queue_urls:
-                added_items.append(item)
-                history.append(url)
-                history_set.add(url)
-                count += 1
+        try:
+            active_ct0 = custom_cookies.get('ct0') or config['twitter_ct0']
+            active_auth_token = custom_cookies.get('auth_token') or config['twitter_auth_token']
+            if not active_auth_token or not active_ct0:
+                await context.bot.send_message(chat_id=chat_id, text="Error: Missing Twitter cookies! Use /setcookies <auth_token> <ct0>")
+                return
                 
-        # Prepend new items so the freshest media is served first
-        tweet_queue = added_items + tweet_queue
-        
-        # Prevent history from growing infinitely and crashing memory
-        if len(history) > 8000:
-            history = history[-8000:]
-        
-        save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"queue", "history"})
-        await context.bot.send_message(chat_id=chat_id, text=f"✅ Scraped {len(items)} posts from List {active_list}, found {count} brand new ones! Total in queue: {len(tweet_queue)}")
-    except Exception as e:
-        if "cookies" in str(e).lower() or "expired" in str(e).lower():
-            await context.bot.send_message(chat_id=chat_id, text=f"{e}")
-        else:
-            await context.bot.send_message(chat_id=chat_id, text=f"❌ Error scraping: {e}")
+            # Extract numeric list ID from active list URL
+            active_url = get_active_list_url()
+            if not active_url:
+                await context.bot.send_message(chat_id=chat_id, text=f"Error: No Twitter list URL configured for List {active_list}! Set it with /list{active_list} <url>")
+                return
+                
+            list_id = active_url.split('?')[0].split('#')[0].rstrip('/').split('/')[-1]
+            items = await extract_media_from_twitter(list_id)
+            
+            count = 0
+            added_items = []
+            
+            # Optimize O(N^2) list scan to O(1) lookups
+            history_set = set(history)
+            queue_urls = {q.get('url') for q in tweet_queue}
+            
+            for item in items:
+                item['source_list'] = f"List {active_list}"
+                item['source_list_num'] = active_list
+                url = item['url']
+                if url not in history_set and url not in queue_urls:
+                    added_items.append(item)
+                    history.append(url)
+                    history_set.add(url)
+                    count += 1
+                    
+            # Prepend new items so the freshest media is served first
+            tweet_queue = added_items + tweet_queue
+            
+            # Prevent history from growing infinitely and crashing memory
+            if len(history) > 8000:
+                history = history[-8000:]
+            
+            save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"queue", "history"})
+            await context.bot.send_message(chat_id=chat_id, text=f"✅ Scraped {len(items)} posts from List {active_list}, found {count} brand new ones! Total in queue: {len(tweet_queue)}")
+        except Exception as e:
+            if "cookies" in str(e).lower() or "expired" in str(e).lower():
+                await context.bot.send_message(chat_id=chat_id, text=f"{e}")
+            else:
+                await context.bot.send_message(chat_id=chat_id, text=f"❌ Error scraping: {e}")
 
 async def scrape_tweets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await do_scrape(context, update.message.chat_id)
@@ -441,7 +455,7 @@ def get_http_client():
 
 # Dead gofile / temp helpers pruned for ponytail simplicity
 
-VERSION = "v1.17.0"
+VERSION = "v1.18.0"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     global tweet_queue, history, unreviewed_count, bot_stats

@@ -1,6 +1,46 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getStoreClient } from '@/lib/apify';
 import { MediaItem, BotStats } from '@/lib/types';
+import { invalidateQueueCache } from '@/lib/cache';
+
+async function dispatchTelegramMedia(botToken: string, channelId: string, item: MediaItem) {
+  const escapedText = (item.text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .slice(0, 800);
+  const caption = `${escapedText}\n\n<a href="${item.tweet_url}">@${item.screen_name || 'author'}</a>`;
+
+  if (item.type === 'album' && item.urls && item.urls.length > 1) {
+    const media = item.urls.map((photoUrl, idx) => ({
+      type: 'photo',
+      media: photoUrl,
+      ...(idx === 0 ? { caption, parse_mode: 'HTML' } : {}),
+    }));
+
+    await fetch(`https://api.telegram.org/bot${botToken}/sendMediaGroup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: channelId, media }),
+      signal: AbortSignal.timeout(15000),
+    });
+  } else {
+    const method = item.type === 'photo' ? 'sendPhoto' : 'sendVideo';
+    const mediaParam = item.type === 'photo' ? 'photo' : 'video';
+
+    await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: channelId,
+        [mediaParam]: item.url,
+        caption,
+        parse_mode: 'HTML',
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+  }
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -32,6 +72,8 @@ export async function POST(req: NextRequest) {
         stats.skipped = Math.max(0, (stats.skipped || 0) - 1);
       }
 
+      invalidateQueueCache();
+
       await Promise.all([
         store.setRecord({ key: 'queue', value: queue as any }),
         store.setRecord({ key: 'bot_stats', value: stats as any }),
@@ -53,54 +95,22 @@ export async function POST(req: NextRequest) {
 
     if (action === 'like') {
       stats.loved = (stats.loved || 0) + 1;
-      
+
       const botToken = process.env.TELEGRAM_BOT_TOKEN;
       const channelId = process.env.TELEGRAM_CHANNEL_ID;
-      
+
       if (botToken && channelId) {
-        const escapedText = (item.text || '')
-          .replace(/&/g, '&amp;')
-          .replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;')
-          .slice(0, 800);
-        const caption = `${escapedText}\n\n<a href="${item.tweet_url}">@${item.screen_name || 'author'}</a>`;
-
-        if (item.type === 'album' && item.urls && item.urls.length > 1) {
-          const media = item.urls.map((photoUrl, idx) => ({
-            type: 'photo',
-            media: photoUrl,
-            ...(idx === 0 ? { caption, parse_mode: 'HTML' } : {}),
-          }));
-
-          await fetch(`https://api.telegram.org/bot${botToken}/sendMediaGroup`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chat_id: channelId,
-              media,
-            }),
-          });
-        } else {
-          const method = item.type === 'photo' ? 'sendPhoto' : 'sendVideo';
-          const mediaParam = item.type === 'photo' ? 'photo' : 'video';
-          
-          await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chat_id: channelId,
-              [mediaParam]: item.url,
-              caption,
-              parse_mode: 'HTML',
-            }),
-          });
-        }
+        // Asynchronous non-blocking dispatch to avoid stalling the user response
+        dispatchTelegramMedia(botToken, channelId, item).catch(err => {
+          console.error('Async Telegram dispatch error:', err);
+        });
       }
     } else if (action === 'skip') {
       stats.skipped = (stats.skipped || 0) + 1;
     }
 
     queue.splice(itemIndex, 1);
+    invalidateQueueCache();
 
     await Promise.all([
       store.setRecord({ key: 'queue', value: queue as any }),

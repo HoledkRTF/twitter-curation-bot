@@ -4,6 +4,28 @@ import React, { useRef, useEffect, useState, useImperativeHandle, forwardRef } f
 import { Play, Loader2, ChevronLeft, ChevronRight } from 'lucide-react';
 import { MediaItem } from '@/lib/types';
 
+export function optimizeTwitterImageUrl(url: string): string {
+  if (!url || !url.includes('pbs.twimg.com')) return url;
+  try {
+    const u = new URL(url);
+    if (u.searchParams.has('format')) {
+      u.searchParams.set('format', 'webp');
+    } else {
+      const extMatch = u.pathname.match(/\.(jpg|jpeg|png)$/i);
+      if (extMatch) {
+        u.pathname = u.pathname.replace(/\.(jpg|jpeg|png)$/i, '');
+        u.searchParams.set('format', 'webp');
+        if (!u.searchParams.has('name')) {
+          u.searchParams.set('name', 'large');
+        }
+      }
+    }
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
 export interface MediaSlideHandle {
   seek: (delta: number) => void;
   getDuration: () => number;
@@ -72,7 +94,8 @@ export const MediaSlide = forwardRef<MediaSlideHandle, MediaSlideProps>(function
 
   const isAlbum = item.type === 'album' || (item.type === 'photo' && !!item.urls && item.urls.length > 1);
   const albumUrls = isAlbum && item.urls && item.urls.length > 0 ? item.urls : [item.url];
-  const currentPhotoUrl = albumUrls[albumIndex] || item.url;
+  const rawPhotoUrl = albumUrls[albumIndex] || item.url;
+  const currentPhotoUrl = optimizeTwitterImageUrl(rawPhotoUrl);
 
   const currentImageSrc = imageUseProxy
     ? `/api/proxy?url=${encodeURIComponent(currentPhotoUrl)}`
@@ -206,6 +229,8 @@ export const MediaSlide = forwardRef<MediaSlideHandle, MediaSlideProps>(function
             alt={item.text || 'Media'}
             className="w-full h-full object-contain pointer-events-none"
             referrerPolicy="no-referrer"
+            loading="eager"
+            decoding="async"
             onLoad={() => setIsLoading(false)}
             onError={handleImageError}
           />

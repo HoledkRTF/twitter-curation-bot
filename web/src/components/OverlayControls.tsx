@@ -15,7 +15,7 @@ interface OverlayControlsProps {
   onSkip: () => void;
 }
 
-export function OverlayControls({
+export const OverlayControls = React.memo(function OverlayControls({
   item,
   queueCount,
   isMuted,
@@ -147,4 +147,4 @@ export function OverlayControls({
       </div>
     </div>
   );
-}
+});

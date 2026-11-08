@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Heart, X, RotateCcw } from 'lucide-react';
 import { MediaItem } from '@/lib/types';
 import { MediaSlide, MediaSlideHandle } from './MediaSlide';
@@ -62,7 +62,7 @@ export function SwipeContainer({
     }
   }, []);
 
-  const handleToggleMute = () => {
+  const handleToggleMute = useCallback(() => {
     setIsMuted(prev => {
       const next = !prev;
       try {
@@ -72,10 +72,11 @@ export function SwipeContainer({
       }
       return next;
     });
-  };
+  }, []);
 
   const safeIndex = Math.min(currentIndex, Math.max(0, items.length - 1));
   const currentItem = items[safeIndex];
+  const nextItem = safeIndex + 1 < items.length ? items[safeIndex + 1] : null;
 
   const handleNext = () => {
     if (currentIndex < items.length - 1) {
@@ -107,18 +108,18 @@ export function SwipeContainer({
     }, 600);
   };
 
-  const handleLike = (burstCoords?: { x: number; y: number }) => {
+  const handleLike = useCallback((burstCoords?: { x: number; y: number }) => {
     if (!currentItem) return;
     const x = burstCoords?.x ?? (typeof window !== 'undefined' ? window.innerWidth / 2 : 200);
     const y = burstCoords?.y ?? (typeof window !== 'undefined' ? window.innerHeight / 2 : 300);
     triggerHeartBurst(x, y);
     onAction('like', currentItem);
-  };
+  }, [currentItem, onAction]);
 
-  const handleSkip = () => {
+  const handleSkip = useCallback(() => {
     if (!currentItem) return;
     onAction('skip', currentItem);
-  };
+  }, [currentItem, onAction]);
 
   // Tap router (Double-tap vs Single-tap)
   const handleTap = (clientX: number, clientY: number) => {
@@ -318,13 +319,36 @@ export function SwipeContainer({
         </div>
       )}
 
+      {/* 15 / 31: Next Media Preloader */}
+      {nextItem && (
+        <div className="hidden" aria-hidden="true">
+          {nextItem.type === 'video' ? (
+            <video
+              src={nextItem.url}
+              preload="metadata"
+              muted
+              playsInline
+              {...({ referrerPolicy: 'no-referrer' } as any)}
+            />
+          ) : (
+            <img
+              src={nextItem.url}
+              loading="eager"
+              decoding="async"
+              referrerPolicy="no-referrer"
+              alt=""
+            />
+          )}
+        </div>
+      )}
+
       {/* Overlay UI Controls */}
       <OverlayControls
         item={currentItem}
         queueCount={items.length}
         isMuted={isMuted}
         onToggleMute={handleToggleMute}
-        onLike={() => handleLike()}
+        onLike={handleLike}
         onSkip={handleSkip}
         activeList={activeList}
         onSwitchList={onSwitchList}
