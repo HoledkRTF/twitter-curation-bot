@@ -258,7 +258,7 @@ async def extract_media_from_twitter(list_id):
                 print(f"Twitter API Error: {res.status_code} - {err_text}")
                 if res.status_code in [401, 403] or "auth" in err_text.lower():
                     raise Exception("⚠️ Twitter cookies (auth_token or ct0) are invalid or have expired! Please update them in Render.")
-                break
+                raise Exception(f"Twitter API error (HTTP {res.status_code}): {err_text}")
                 
             data = res.json()
             instructions = data.get('data', {}).get('list', {}).get('tweets_timeline', {}).get('timeline', {}).get('instructions', [])
@@ -383,7 +383,7 @@ async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
             await context.bot.send_message(chat_id=chat_id, text=f"Error: No Twitter list URL configured for List {active_list}! Set it with /list{active_list} <url>")
             return
             
-        list_id = active_url.rstrip('/').split('/')[-1]
+        list_id = active_url.split('?')[0].split('#')[0].rstrip('/').split('/')[-1]
         items = await extract_media_from_twitter(list_id)
         
         count = 0
@@ -439,31 +439,9 @@ def get_http_client():
         _http_client = httpx.AsyncClient(timeout=180.0)
     return _http_client
 
-async def fetch_media_to_temp(url, type_='video'):
-    suffix = '.mp4' if type_ == 'video' else '.jpg'
-    fd, path = tempfile.mkstemp(suffix=suffix)
-    os.close(fd)
-    
-    client = get_http_client()
-    async with client.stream("GET", url) as response:
-        response.raise_for_status()
-        with open(path, 'wb') as f:
-            async for chunk in response.aiter_bytes(chunk_size=65536):
-                f.write(chunk)
-    return path
+# Dead gofile / temp helpers pruned for ponytail simplicity
 
-async def upload_to_gofile(filepath, filename="video.mp4"):
-    client = get_http_client()
-    res = await client.get("https://api.gofile.io/servers")
-    server = res.json()['data']['servers'][0]['name']
-    
-    with open(filepath, 'rb') as f:
-        files = {'file': (filename, f)}
-        upload_res = await client.post(f"https://{server}.gofile.io/contents/uploadfile", files=files)
-        
-    return upload_res.json()['data']['downloadPage']
-
-VERSION = "v1.15.0"
+VERSION = "v1.16.0"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     global tweet_queue, history, unreviewed_count, bot_stats
@@ -540,11 +518,11 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     
     # Creator username directly on link
     author = next_item.get('screen_name')
-    if not author or author == 'unknown':
+    if not author or author in ('unknown', 'i'):
         parts = next_item.get('tweet_url', '').split('/')
-        if len(parts) >= 4 and parts[3] not in ('', 'unknown'):
+        if len(parts) >= 4 and parts[3] not in ('', 'unknown', 'i'):
             author = parts[3]
-    author_label = f"@{author}" if author and author != 'unknown' else "Link to Tweet"
+    author_label = f"@{author}" if author and author not in ('unknown', 'i') else "Link to Tweet"
 
     safe_text = html.escape(next_item['text'][:800])
     src_num = next_item.get('source_list_num')
@@ -589,6 +567,7 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
             return True
 
     elif next_item.get('type') == 'photo':
+        photo_sent = False
         try:
             msg = await context.bot.send_photo(
                 chat_id=chat_id,
@@ -597,14 +576,44 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=reply_markup,
                 parse_mode="HTML"
             )
+            photo_sent = True
+        except Exception as e:
+            print(f"Direct photo send by URL failed: {e}")
+            tf_path = None
+            try:
+                client = get_http_client()
+                async with client.stream("GET", next_item['url'], follow_redirects=True, timeout=30.0) as resp:
+                    if resp.status_code == 200:
+                        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+                            tf_path = tf.name
+                            async for chunk in resp.aiter_bytes(chunk_size=65536):
+                                tf.write(chunk)
+                        with open(tf_path, "rb") as photo_fp:
+                            msg = await context.bot.send_photo(
+                                chat_id=chat_id,
+                                photo=photo_fp,
+                                caption=caption,
+                                reply_markup=reply_markup,
+                                parse_mode="HTML"
+                            )
+                        photo_sent = True
+            except Exception as dl_err:
+                print(f"Photo upload fallback failed: {dl_err}")
+            finally:
+                if tf_path and os.path.exists(tf_path):
+                    try:
+                        os.remove(tf_path)
+                    except Exception:
+                        pass
+
+        if photo_sent:
             review_dict[str(msg.message_id)] = next_item
             unreviewed_count += 1
             save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, review_dict, keys={"queue", "unreviewed_count", "review_dict"})
             await status_msg.delete()
             return True
-        except Exception as e:
-            print(f"Direct photo send failed: {e}")
-            fallback_msg = f"⚠️ <b>Photo display failed ({e}).</b>\n🔗 <a href='{next_item['url']}'>Direct Photo Link</a>\n\n{caption}"
+        else:
+            fallback_msg = f"⚠️ <b>Photo display failed.</b>\n🔗 <a href='{next_item.get('tweet_url', '')}'>View on X</a> • <a href='{next_item['url']}'>Direct Photo Link</a>\n\n{caption}"
             msg = await status_msg.edit_text(text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
             review_dict[str(msg.message_id)] = next_item
             unreviewed_count += 1
@@ -636,40 +645,48 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
                 print(f"Direct video URL send failed for {u}: {e}")
                 continue
                 
-        # 2. Second attempt: If URL send failed (>20MB URL limit), download and upload directly (up to 50MB)
+        # 2. Second attempt: If URL send failed (>20MB URL limit), stream-download and upload directly (up to 50MB)
         if not sent_video:
+            client = get_http_client()
             for u in urls_to_try:
+                tf_path = None
                 try:
-                    async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as dl_client:
-                        head = await dl_client.head(u)
-                        cl = int(head.headers.get('content-length', 0))
-                        if 0 < cl <= 50 * 1024 * 1024:
-                            resp = await dl_client.get(u)
-                            if resp.status_code == 200:
-                                with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tf:
-                                    tf.write(resp.content)
-                                    tf_path = tf.name
-                                try:
-                                    with open(tf_path, 'rb') as video_fp:
-                                        msg = await context.bot.send_video(
-                                            chat_id=chat_id,
-                                            video=video_fp,
-                                            caption=caption,
-                                            reply_markup=reply_markup,
-                                            parse_mode="HTML",
-                                            **v_kwargs
-                                        )
-                                    sent_video = True
-                                finally:
-                                    if os.path.exists(tf_path):
-                                        try:
-                                            os.remove(tf_path)
-                                        except Exception:
-                                            pass
-                                if sent_video:
-                                    break
+                    async with client.stream("GET", u, follow_redirects=True, timeout=60.0) as stream_resp:
+                        if stream_resp.status_code == 200:
+                            cl_header = stream_resp.headers.get("content-length")
+                            if cl_header and int(cl_header) > 50 * 1024 * 1024:
+                                continue
+                            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tf:
+                                tf_path = tf.name
+                                total_bytes = 0
+                                too_large = False
+                                async for chunk in stream_resp.aiter_bytes(chunk_size=131072):
+                                    total_bytes += len(chunk)
+                                    if total_bytes > 50 * 1024 * 1024:
+                                        too_large = True
+                                        break
+                                    tf.write(chunk)
+                            if too_large:
+                                continue
+                            with open(tf_path, "rb") as video_fp:
+                                msg = await context.bot.send_video(
+                                    chat_id=chat_id,
+                                    video=video_fp,
+                                    caption=caption,
+                                    reply_markup=reply_markup,
+                                    parse_mode="HTML",
+                                    **v_kwargs
+                                )
+                            sent_video = True
+                            break
                 except Exception as dl_err:
-                    print(f"Direct download & upload fallback failed for {u}: {dl_err}")
+                    print(f"Direct stream download & upload fallback failed for {u}: {dl_err}")
+                finally:
+                    if tf_path and os.path.exists(tf_path):
+                        try:
+                            os.remove(tf_path)
+                        except Exception:
+                            pass
 
         if sent_video:
             review_dict[str(msg.message_id)] = next_item
@@ -782,7 +799,7 @@ async def auto_scrape_job(context: ContextTypes.DEFAULT_TYPE):
     active_url = get_active_list_url()
     if not active_url:
         return
-    list_id = active_url.rstrip('/').split('/')[-1]
+    list_id = active_url.split('?')[0].split('#')[0].rstrip('/').split('/')[-1]
     try:
         items = await extract_media_from_twitter(list_id)
         if not items:
@@ -1086,6 +1103,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     action = query.data
     chat_id = update.effective_chat.id if update.effective_chat else query.message.chat_id
+    if action == "like":
+        await query.answer("❤️ Saved to channel!")
+    elif action == "skip":
+        await query.answer("🗑️ Skipped")
     
     try:
         msg_id_str = str(query.message.message_id)
