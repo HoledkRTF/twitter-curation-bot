@@ -295,7 +295,7 @@ async def extract_media_from_twitter(list_id):
                             # Clean trailing t.co attachment links
                             tweet_text = re.sub(r'\s*https://t\.co/[a-zA-Z0-9]+$', '', tweet_text).strip()
                                 
-                            media = tweet.get('extended_entities', {}).get('media', [])
+                            media = legacy.get('extended_entities', {}).get('media', []) or tweet.get('extended_entities', {}).get('media', []) or legacy.get('entities', {}).get('media', [])
                             
                             photos = [m for m in media if m.get('type') == 'photo']
                             videos = [m for m in media if m.get('type') in ['video', 'animated_gif']]
