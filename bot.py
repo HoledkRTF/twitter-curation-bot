@@ -48,7 +48,7 @@ def load_data():
     unreviewed_count = 0
     media_filter = "all"
     custom_cookies = {}
-    include_retweets = False
+    include_retweets = True
     custom_list_url = ""
     bot_stats = {"loved": 0, "skipped": 0}
     list1_url = ""
@@ -189,6 +189,31 @@ def save_data(tweet_queue=None, history=None, unreviewed_count=None, media_filte
 
 last_skipped = None
 
+def extract_media_from_tweet_node(tweet_node):
+    media_list = []
+    if not tweet_node or not isinstance(tweet_node, dict):
+        return media_list
+    legacy_node = tweet_node.get('legacy', {})
+    std_media = (
+        legacy_node.get('extended_entities', {}).get('media', []) or
+        tweet_node.get('extended_entities', {}).get('media', []) or
+        legacy_node.get('entities', {}).get('media', [])
+    )
+    if std_media:
+        media_list.extend(std_media)
+        
+    card = tweet_node.get('card', {})
+    for b in card.get('legacy', {}).get('binding_values', []):
+        if b.get('key') == 'unified_card':
+            try:
+                val = json.loads(b['value']['string_value'])
+                media_entities = val.get('media_entities', {})
+                for me in media_entities.values():
+                    media_list.append(me)
+            except Exception:
+                pass
+    return media_list
+
 async def extract_media_from_twitter(list_id):
     extracted_items = []
     
@@ -289,19 +314,33 @@ async def extract_media_from_twitter(list_id):
                                 tweet_url = f"https://x.com/i/status/{tweet_id}"
                             tweet_text = legacy.get('full_text', '')
                             
-                            if 'retweeted_status_result' in tweet and not include_retweets:
-                                continue # Skip retweets unless /rt on is set
+                            # Check if retweet
+                            rt_data = tweet.get('retweeted_status_result') or legacy.get('retweeted_status_result')
+                            target_tweet = tweet
+                            if rt_data:
+                                if not include_retweets:
+                                    continue # Skip retweets when /rt off is set
+                                rt_res = rt_data.get('result', {})
+                                rt_target = rt_res.get('tweet', rt_res)
+                                rt_user_res = rt_target.get('core', {}).get('user_results', {}).get('result', {})
+                                rt_screen_name = rt_user_res.get('core', {}).get('screen_name') or rt_user_res.get('legacy', {}).get('screen_name')
+                                if rt_screen_name:
+                                    screen_name = rt_screen_name
+                                    tweet_id = rt_target.get('legacy', {}).get('id_str') or rt_target.get('rest_id', '')
+                                    tweet_url = f"https://x.com/{screen_name}/status/{tweet_id}"
+                                    tweet_text = rt_target.get('legacy', {}).get('full_text', tweet_text)
+                                target_tweet = rt_target
                                 
                             # Clean trailing t.co attachment links
                             tweet_text = re.sub(r'\s*https://t\.co/[a-zA-Z0-9]+$', '', tweet_text).strip()
                                 
-                            media = legacy.get('extended_entities', {}).get('media', []) or tweet.get('extended_entities', {}).get('media', []) or legacy.get('entities', {}).get('media', [])
+                            media = extract_media_from_tweet_node(target_tweet)
                             
                             photos = [m for m in media if m.get('type') == 'photo']
-                            videos = [m for m in media if m.get('type') in ['video', 'animated_gif']]
+                            videos = [m for m in media if m.get('type') in ['video', 'animated_gif'] or m.get('video_info')]
                             
                             if len(photos) > 1:
-                                photo_urls = [m.get('media_url_https') for m in photos if m.get('media_url_https')]
+                                photo_urls = [m.get('media_url_https') or m.get('media_url') for m in photos if m.get('media_url_https') or m.get('media_url')]
                                 if photo_urls:
                                     album_obj = {
                                         'tweet_url': tweet_url,
@@ -318,14 +357,16 @@ async def extract_media_from_twitter(list_id):
                                     extracted_items.append(album_obj)
                             elif len(photos) == 1:
                                 m = photos[0]
-                                media_obj = {
-                                    'tweet_url': tweet_url,
-                                    'text': tweet_text,
-                                    'screen_name': screen_name,
-                                    'type': 'photo',
-                                    'url': m['media_url_https'],
-                                    'urls': [m['media_url_https']],
-                                }
+                                p_url = m.get('media_url_https') or m.get('media_url')
+                                if p_url:
+                                    media_obj = {
+                                        'tweet_url': tweet_url,
+                                        'text': tweet_text,
+                                        'screen_name': screen_name,
+                                        'type': 'photo',
+                                        'url': p_url,
+                                        'urls': [p_url],
+                                    }
                                 orig = m.get('original_info', {})
                                 if orig.get('width') and orig.get('height'):
                                     media_obj['width'] = orig['width']
@@ -455,7 +496,7 @@ def get_http_client():
 
 # Dead gofile / temp helpers pruned for ponytail simplicity
 
-VERSION = "v1.18.0"
+VERSION = "v1.19.0"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     global tweet_queue, history, unreviewed_count, bot_stats
@@ -1331,6 +1372,10 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     print(f"Auto-detected Channel ID: {channel_id}")
 
 async def post_init(application: Application):
+    try:
+        await application.bot.delete_webhook(drop_pending_updates=False)
+    except Exception as e:
+        print(f"Failed to delete webhook during post_init: {e}")
     application.job_queue.run_repeating(auto_scrape_job, interval=3600, first=60)
     await application.bot.set_my_commands([
         ("lists", "View and switch between your 2 Twitter lists"),
