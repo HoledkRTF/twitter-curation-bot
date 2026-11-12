@@ -47,11 +47,18 @@ _storage_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 _active_background_tasks = set()
 
 def _sync_set_records(records):
+    import time
     for k, v in records.items():
-        try:
-            store_client.set_record(k, v)
-        except Exception as e:
-            print(f"Error saving {k} to KV store: {e}")
+        success = False
+        for attempt in range(3):
+            try:
+                store_client.set_record(k, v)
+                success = True
+                break
+            except Exception as e:
+                time.sleep(0.5 * (2 ** attempt))
+        if not success:
+            print(f"Error: Failed to save {k} to KV store after 3 attempts.")
 
 def load_data():
     tweet_queue = []
@@ -388,7 +395,7 @@ async def extract_media_from_twitter(list_id, target_count=None, known_urls=None
                                         album_obj['width'] = orig['width']
                                         album_obj['height'] = orig['height']
                                     extracted_items.append(album_obj)
-                                    if known_urls is None or not any(u in known_urls for u in photo_urls):
+                                    if known_urls is None or any(u not in known_urls for u in photo_urls):
                                         new_items_found += 1
                             elif len(photos) == 1:
                                 m = photos[0]
@@ -402,13 +409,13 @@ async def extract_media_from_twitter(list_id, target_count=None, known_urls=None
                                         'url': p_url,
                                         'urls': [p_url],
                                     }
-                                orig = m.get('original_info', {})
-                                if orig.get('width') and orig.get('height'):
-                                    media_obj['width'] = orig['width']
-                                    media_obj['height'] = orig['height']
-                                extracted_items.append(media_obj)
-                                if known_urls is None or p_url not in known_urls:
-                                    new_items_found += 1
+                                    orig = m.get('original_info', {})
+                                    if orig.get('width') and orig.get('height'):
+                                        media_obj['width'] = orig['width']
+                                        media_obj['height'] = orig['height']
+                                    extracted_items.append(media_obj)
+                                    if known_urls is None or p_url not in known_urls:
+                                        new_items_found += 1
                                 
                             for m in videos:
                                 media_obj = {'tweet_url': tweet_url, 'text': tweet_text, 'screen_name': screen_name}
@@ -506,11 +513,12 @@ async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int, target_cou
             for item in items:
                 item['source_list'] = f"List {active_list}"
                 item['source_list_num'] = active_list
-                url = item['url']
-                if url not in history_set and url not in queue_urls:
+                item_urls = item.get('urls', [item.get('url')])
+                if any(u not in history_set for u in item_urls) and item['url'] not in queue_urls:
                     added_items.append(item)
-                    history.append(url)
-                    history_set.add(url)
+                    for u in item_urls:
+                        history.append(u)
+                        history_set.add(u)
                     count += 1
                     
             # Prepend new items so the freshest media is served first
@@ -551,7 +559,7 @@ def get_http_client():
 
 # Dead gofile / temp helpers pruned for ponytail simplicity
 
-VERSION = "v1.21.0"
+VERSION = "v1.22.0"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     global tweet_queue, history, unreviewed_count, bot_stats
@@ -1255,6 +1263,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text("Error: You haven't set a Channel ID yet! Use /channel <id>")
                 return
                 
+            # Immediately strip buttons to prevent duplicate taps while background copy executes (Finding 1)
+            try:
+                await query.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+                
             # Background task for channel copying & chat cleanup (Findings 2, 3 & 8)
             async def _do_like_transfer():
                 copy_success = False
@@ -1334,6 +1348,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bot_stats["skipped"] = bot_stats.get("skipped", 0) + 1
             if item:
                 last_skipped = item
+                
+            # Immediately strip buttons to prevent duplicate taps (Finding 1)
+            try:
+                await query.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
                 
             # Clean up album media messages in parallel (Finding 5)
             if is_album_control and album_mids:
