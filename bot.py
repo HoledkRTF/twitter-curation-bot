@@ -8,6 +8,7 @@ import tempfile
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from apify_client import ApifyClient
+import concurrent.futures
 
 # Config from environment variables, falling back to config.json if present
 config = {
@@ -42,6 +43,15 @@ except Exception as e:
     print(f"Failed to connect to Apify KV Store: {e}")
     store_client = None
 
+_storage_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+
+def _sync_set_records(records):
+    for k, v in records.items():
+        try:
+            store_client.set_record(k, v)
+        except Exception as e:
+            print(f"Error saving {k} to KV store: {e}")
+
 def load_data():
     tweet_queue = []
     history = []
@@ -57,7 +67,23 @@ def load_data():
     review_dict = {}
     
     if store_client:
-        q_rec = store_client.get_record("queue")
+        keys_to_fetch = [
+            "queue", "history", "unreviewed_count", "media_filter",
+            "custom_cookies", "include_retweets", "list1_url", "custom_list_url",
+            "list2_url", "active_list", "bot_stats", "review_dict"
+        ]
+        results = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            future_to_key = {executor.submit(store_client.get_record, k): k for k in keys_to_fetch}
+            for future in concurrent.futures.as_completed(future_to_key):
+                k = future_to_key[future]
+                try:
+                    results[k] = future.result()
+                except Exception as e:
+                    print(f"Error loading {k} from KV store: {e}")
+                    results[k] = None
+
+        q_rec = results.get("queue")
         if q_rec and q_rec.get('value'):
             raw_queue = q_rec['value']
             seen_tweets = {}
@@ -83,48 +109,50 @@ def load_data():
                 else:
                     coalesced.append(it)
             tweet_queue = coalesced
-            
-        h_rec = store_client.get_record("history")
+
+        h_rec = results.get("history")
         if h_rec and h_rec.get('value'):
             history = h_rec['value']
-            
-        u_rec = store_client.get_record("unreviewed_count")
+            if len(history) > 5000:
+                history = history[-5000:]
+
+        u_rec = results.get("unreviewed_count")
         if u_rec and u_rec.get('value') is not None:
             unreviewed_count = u_rec['value']
-            
-        f_rec = store_client.get_record("media_filter")
+
+        f_rec = results.get("media_filter")
         if f_rec and f_rec.get('value'):
             media_filter = f_rec['value']
-            
-        c_rec = store_client.get_record("custom_cookies")
+
+        c_rec = results.get("custom_cookies")
         if c_rec and c_rec.get('value'):
             custom_cookies = c_rec['value']
-            
-        r_rec = store_client.get_record("include_retweets")
+
+        r_rec = results.get("include_retweets")
         if r_rec and r_rec.get('value') is not None:
             include_retweets = r_rec['value']
-            
-        l1_rec = store_client.get_record("list1_url")
+
+        l1_rec = results.get("list1_url")
         if l1_rec and l1_rec.get('value'):
             list1_url = l1_rec['value']
         else:
-            c_rec = store_client.get_record("custom_list_url")
-            if c_rec and c_rec.get('value'):
-                list1_url = c_rec['value']
+            cl_rec = results.get("custom_list_url")
+            if cl_rec and cl_rec.get('value'):
+                list1_url = cl_rec['value']
 
-        l2_rec = store_client.get_record("list2_url")
+        l2_rec = results.get("list2_url")
         if l2_rec and l2_rec.get('value'):
             list2_url = l2_rec['value']
 
-        act_rec = store_client.get_record("active_list")
+        act_rec = results.get("active_list")
         if act_rec and act_rec.get('value'):
             active_list = str(act_rec['value'])
-            
-        s_rec = store_client.get_record("bot_stats")
+
+        s_rec = results.get("bot_stats")
         if s_rec and s_rec.get('value'):
             bot_stats = s_rec['value']
 
-        rd_rec = store_client.get_record("review_dict")
+        rd_rec = results.get("review_dict")
         if rd_rec and rd_rec.get('value'):
             review_dict = {str(k): v for k, v in rd_rec['value'].items()}
             for k, it in review_dict.items():
@@ -147,45 +175,48 @@ def get_active_list_url():
 def save_lists():
     if store_client:
         curr_url = get_active_list_url()
-        store_client.set_record("custom_list_url", curr_url)
-        store_client.set_record("list1_url", list1_url)
-        store_client.set_record("list2_url", list2_url)
-        store_client.set_record("active_list", active_list)
+        records = {
+            "custom_list_url": curr_url,
+            "list1_url": list1_url,
+            "list2_url": list2_url,
+            "active_list": active_list,
+        }
+        _storage_executor.submit(_sync_set_records, records)
 
 def save_data(tweet_queue=None, history=None, unreviewed_count=None, media_filter=None, custom_cookies=None, include_retweets=None, custom_list_url=None, bot_stats=None, review_dict=None, keys=None):
-    if store_client:
-        if keys is None:
-            keys = {"queue", "history", "unreviewed_count", "media_filter", "custom_cookies", "include_retweets", "custom_list_url", "bot_stats", "review_dict"}
-        if "queue" in keys:
-            val = tweet_queue if tweet_queue is not None else globals().get('tweet_queue', [])
-            store_client.set_record("queue", val)
-        if "history" in keys:
-            val = history if history is not None else globals().get('history', [])
-            store_client.set_record("history", val)
-        if "unreviewed_count" in keys:
-            val = unreviewed_count if unreviewed_count is not None else globals().get('unreviewed_count', 0)
-            store_client.set_record("unreviewed_count", val)
-        if "media_filter" in keys:
-            val = media_filter if media_filter is not None else globals().get('media_filter', 'all')
-            store_client.set_record("media_filter", val)
-        if "custom_cookies" in keys:
-            val = custom_cookies if custom_cookies is not None else globals().get('custom_cookies', {})
-            store_client.set_record("custom_cookies", val)
-        if "include_retweets" in keys:
-            val = include_retweets if include_retweets is not None else globals().get('include_retweets', False)
-            store_client.set_record("include_retweets", val)
-        if "custom_list_url" in keys or "lists" in keys:
-            curr_url = get_active_list_url()
-            store_client.set_record("custom_list_url", curr_url)
-            store_client.set_record("list1_url", globals().get('list1_url', ''))
-            store_client.set_record("list2_url", globals().get('list2_url', ''))
-            store_client.set_record("active_list", globals().get('active_list', '1'))
-        if "bot_stats" in keys:
-            val = bot_stats if bot_stats is not None else globals().get('bot_stats', {})
-            store_client.set_record("bot_stats", val)
-        if "review_dict" in keys:
-            val = review_dict if review_dict is not None else globals().get('review_dict', {})
-            store_client.set_record("review_dict", val)
+    if not store_client:
+        return
+    if keys is None:
+        keys = {"queue", "history", "unreviewed_count", "media_filter", "custom_cookies", "include_retweets", "custom_list_url", "bot_stats", "review_dict"}
+    records = {}
+    if "queue" in keys:
+        val = tweet_queue if tweet_queue is not None else globals().get('tweet_queue', [])
+        records["queue"] = list(val)
+    if "history" in keys:
+        val = history if history is not None else globals().get('history', [])
+        if len(val) > 5000:
+            val = val[-5000:]
+            globals()['history'] = val
+        records["history"] = list(val)
+    if "unreviewed_count" in keys:
+        records["unreviewed_count"] = unreviewed_count if unreviewed_count is not None else globals().get('unreviewed_count', 0)
+    if "media_filter" in keys:
+        records["media_filter"] = media_filter if media_filter is not None else globals().get('media_filter', 'all')
+    if "custom_cookies" in keys:
+        records["custom_cookies"] = dict(custom_cookies if custom_cookies is not None else globals().get('custom_cookies', {}))
+    if "include_retweets" in keys:
+        records["include_retweets"] = include_retweets if include_retweets is not None else globals().get('include_retweets', False)
+    if "custom_list_url" in keys or "lists" in keys:
+        records["custom_list_url"] = get_active_list_url()
+        records["list1_url"] = globals().get('list1_url', '')
+        records["list2_url"] = globals().get('list2_url', '')
+        records["active_list"] = globals().get('active_list', '1')
+    if "bot_stats" in keys:
+        records["bot_stats"] = dict(bot_stats if bot_stats is not None else globals().get('bot_stats', {}))
+    if "review_dict" in keys:
+        records["review_dict"] = dict(review_dict if review_dict is not None else globals().get('review_dict', {}))
+
+    _storage_executor.submit(_sync_set_records, records)
 
 last_skipped = None
 
@@ -214,7 +245,7 @@ def extract_media_from_tweet_node(tweet_node):
                 pass
     return media_list
 
-async def extract_media_from_twitter(list_id):
+async def extract_media_from_twitter(list_id, target_count=None):
     extracted_items = []
     
     active_ct0 = custom_cookies.get('ct0') or config['twitter_ct0']
@@ -392,13 +423,14 @@ async def extract_media_from_twitter(list_id):
                                     media_obj['type'] = 'video'
                                     extracted_items.append(media_obj)
                                         
-            # If we didn't get a new cursor, or we have 500+ items, stop paginating
-            if not new_cursor or len(extracted_items) >= 500:
+            # If we didn't get a new cursor, or we reached target count, stop paginating early
+            max_limit = target_count if target_count else 500
+            if not new_cursor or len(extracted_items) >= max_limit:
                 break
             cursor = new_cursor
             
             # Small delay to avoid rate limits
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.3)
         except Exception as e:
             print(f"Error making GraphQL request: {e}")
             if "cookies" in str(e).lower() or "expired" in str(e).lower():
@@ -415,7 +447,7 @@ def get_scrape_lock():
         _scrape_lock = asyncio.Lock()
     return _scrape_lock
 
-async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int, target_count: int = None):
     global tweet_queue, history, unreviewed_count
     lock = get_scrape_lock()
     if lock.locked():
@@ -439,7 +471,7 @@ async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
                 return
                 
             list_id = active_url.split('?')[0].split('#')[0].rstrip('/').split('/')[-1]
-            items = await extract_media_from_twitter(list_id)
+            items = await extract_media_from_twitter(list_id, target_count=target_count)
             
             count = 0
             added_items = []
@@ -496,12 +528,12 @@ def get_http_client():
 
 # Dead gofile / temp helpers pruned for ponytail simplicity
 
-VERSION = "v1.19.0"
+VERSION = "v1.20.0"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     global tweet_queue, history, unreviewed_count, bot_stats
     if not tweet_queue:
-        await do_scrape(context, chat_id)
+        await do_scrape(context, chat_id, target_count=30)
         if not tweet_queue:
             await context.bot.send_message(chat_id=chat_id, text="Still empty! Try scraping again later when the Twitter list has new posts.")
             return False
@@ -523,13 +555,14 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=chat_id, text=f"No {f_type} left in the queue! They might have been filtered out. Try changing the filter with /fa or run /scrape.")
         return False
 
-    next_item = tweet_queue.pop(match_index)
+    # Do not pop from tweet_queue yet - ensure delivery succeeds first (Finding 10)
+    raw_item = tweet_queue[match_index]
+    next_item = dict(raw_item)
     
     # Merge any sibling photos for this tweet still in tweet_queue
     if next_item.get('type') in ['photo', 'album'] and next_item.get('tweet_url'):
         same_items = [it for it in tweet_queue if it.get('tweet_url') == next_item['tweet_url'] and it.get('type') in ['photo', 'album']]
-        if same_items:
-            tweet_queue = [it for it in tweet_queue if not (it.get('tweet_url') == next_item['tweet_url'] and it.get('type') in ['photo', 'album'])]
+        if len(same_items) > 1 or next_item.get('type') == 'album':
             next_item['type'] = 'album'
             urls = next_item.setdefault('urls', [next_item['url']])
             for it in same_items:
@@ -542,8 +575,6 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if next_item.get('text'):
         next_item['text'] = re.sub(r'\s*https://t\.co/[a-zA-Z0-9]+$', '', next_item['text']).strip()
 
-    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"queue"})
-    
     tweet_x_url = next_item.get('tweet_url', '')
     if '/unknown/' in tweet_x_url:
         tweet_x_url = tweet_x_url.replace('/unknown/', '/i/')
@@ -597,8 +628,9 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     list_label = f" • <i>List {src_num}</i>" if src_num else ""
     caption = f"{badge_header}{safe_text}\n\n<a href='{next_item['tweet_url']}'>{author_label}</a>{list_label}\n\n<code>{VERSION}</code>"
     
-    status_msg = await context.bot.send_message(chat_id=chat_id, text="Loading next item...")
-    
+    # Direct delivery without 'Loading next item...' placeholder (Finding 6)
+    delivered_msg_id = None
+
     if next_item.get('type') == 'album':
         photo_urls = next_item.get('urls', [next_item['url']])
         try:
@@ -620,22 +652,15 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML",
                 reply_to_message_id=media_msgs[0].message_id
             )
-            review_dict[str(ctrl_msg.message_id)] = next_item
-            unreviewed_count += 1
-            save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, review_dict, keys={"queue", "unreviewed_count", "review_dict"})
-            await status_msg.delete()
-            return True
+            delivered_msg_id = ctrl_msg.message_id
         except Exception as e:
             print(f"Error sending album via URL: {e}")
-            fallback_msg = f"⚠️ <b>Album sending failed ({e}).</b>\n🔗 <a href='{next_item['url']}'>Direct Media Link</a>\n\n{caption}"
-            ctrl_msg = await status_msg.edit_text(text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
-            review_dict[str(ctrl_msg.message_id)] = next_item
-            unreviewed_count += 1
-            save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, review_dict, keys={"queue", "unreviewed_count", "review_dict"})
-            return True
+            fallback_msg = f"⚠️ <b>Album sending failed ({e}).</b>\n🔗 <a href='{next_item.get('tweet_url', '')}'>View on X</a>\n\n{caption}"
+            ctrl_msg = await context.bot.send_message(chat_id=chat_id, text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
+            delivered_msg_id = ctrl_msg.message_id
 
     elif next_item.get('type') == 'photo':
-        photo_sent = False
+        msg = None
         try:
             msg = await context.bot.send_photo(
                 chat_id=chat_id,
@@ -644,13 +669,12 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=reply_markup,
                 parse_mode="HTML"
             )
-            photo_sent = True
         except Exception as e:
             print(f"Direct photo send by URL failed: {e}")
             tf_path = None
             try:
                 client = get_http_client()
-                async with client.stream("GET", next_item['url'], follow_redirects=True, timeout=30.0) as resp:
+                async with client.stream("GET", next_item['url'], follow_redirects=True, timeout=20.0) as resp:
                     if resp.status_code == 200:
                         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
                             tf_path = tf.name
@@ -664,7 +688,6 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
                                 reply_markup=reply_markup,
                                 parse_mode="HTML"
                             )
-                        photo_sent = True
             except Exception as dl_err:
                 print(f"Photo upload fallback failed: {dl_err}")
             finally:
@@ -674,23 +697,14 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
                     except Exception:
                         pass
 
-        if photo_sent:
-            review_dict[str(msg.message_id)] = next_item
-            unreviewed_count += 1
-            save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, review_dict, keys={"queue", "unreviewed_count", "review_dict"})
-            await status_msg.delete()
-            return True
-        else:
+        if not msg:
             fallback_msg = f"⚠️ <b>Photo display failed.</b>\n🔗 <a href='{next_item.get('tweet_url', '')}'>View on X</a> • <a href='{next_item['url']}'>Direct Photo Link</a>\n\n{caption}"
-            msg = await status_msg.edit_text(text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
-            review_dict[str(msg.message_id)] = next_item
-            unreviewed_count += 1
-            save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, review_dict, keys={"queue", "unreviewed_count", "review_dict"})
-            return True
+            msg = await context.bot.send_message(chat_id=chat_id, text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
+        delivered_msg_id = msg.message_id
 
     elif next_item.get('type') == 'video':
         urls_to_try = next_item.get('urls', [next_item['url']])
-        sent_video = False
+        msg = None
         v_kwargs = {}
         if next_item.get('width'): v_kwargs['width'] = next_item['width']
         if next_item.get('height'): v_kwargs['height'] = next_item['height']
@@ -707,23 +721,18 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="HTML",
                     **v_kwargs
                 )
-                sent_video = True
                 break
             except Exception as e:
                 print(f"Direct video URL send failed for {u}: {e}")
                 continue
                 
-        # 2. Second attempt: If URL send failed (>20MB URL limit), stream-download and upload directly (up to 50MB)
-        if not sent_video:
-            try:
-                await status_msg.edit_text("⏳ Uploading video to Telegram...")
-            except Exception:
-                pass
+        # 2. Second attempt: If URL send failed, stream-download and upload directly (20s timeout, up to 50MB)
+        if not msg:
             client = get_http_client()
             for u in urls_to_try:
                 tf_path = None
                 try:
-                    async with client.stream("GET", u, follow_redirects=True, timeout=60.0) as stream_resp:
+                    async with client.stream("GET", u, follow_redirects=True, timeout=20.0) as stream_resp:
                         if stream_resp.status_code == 200:
                             cl_header = stream_resp.headers.get("content-length")
                             if cl_header and int(cl_header) > 50 * 1024 * 1024:
@@ -749,7 +758,6 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
                                     parse_mode="HTML",
                                     **v_kwargs
                                 )
-                            sent_video = True
                             break
                 except Exception as dl_err:
                     print(f"Direct stream download & upload fallback failed for {u}: {dl_err}")
@@ -760,25 +768,15 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
                         except Exception:
                             pass
 
-        if sent_video:
-            review_dict[str(msg.message_id)] = next_item
-            unreviewed_count += 1
-            save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, review_dict, keys={"queue", "unreviewed_count", "review_dict"})
-            await status_msg.delete()
-            return True
-        else:
+        if not msg:
             t_url = next_item.get('tweet_url', '')
             if '/unknown/' in t_url:
                 t_url = t_url.replace('/unknown/', '/i/')
             if not t_url or 'status/' not in t_url:
                 t_url = f"https://x.com/i/status/{next_item.get('id', '')}"
-                
             watch_x_url = t_url.replace('vxtwitter.com', 'x.com')
-            fxtwitter_url = t_url.replace('vxtwitter.com', 'fxtwitter.com')
-            if 'x.com' in fxtwitter_url:
-                fxtwitter_url = fxtwitter_url.replace('x.com', 'fxtwitter.com')
+            fxtwitter_url = t_url.replace('vxtwitter.com', 'fxtwitter.com').replace('x.com', 'fxtwitter.com')
             media_url = next_item.get('url', '')
-            
             fallback_msg = (
                 f"⚠️ <b>Video exceeds Telegram's 50MB upload limit.</b>\n\n"
                 f"🔗 <a href='{watch_x_url}'>Watch on X</a> • "
@@ -786,12 +784,22 @@ async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
                 f"<a href='{media_url}'>Direct MP4</a>\n\n"
                 f"{caption}"
             )
-            msg = await status_msg.edit_text(text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
-            review_dict[str(msg.message_id)] = next_item
-            unreviewed_count += 1
-            save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, review_dict, keys={"queue", "unreviewed_count", "review_dict"})
-            return True
+            msg = await context.bot.send_message(chat_id=chat_id, text=fallback_msg, reply_markup=reply_markup, parse_mode="HTML")
+        delivered_msg_id = msg.message_id
 
+    # Delivery confirmed! Remove from tweet_queue now (Finding 10)
+    if next_item.get('type') in ['photo', 'album'] and next_item.get('tweet_url'):
+        tweet_queue = [it for it in tweet_queue if not (it.get('tweet_url') == next_item['tweet_url'] and it.get('type') in ['photo', 'album'])]
+    else:
+        if match_index < len(tweet_queue) and tweet_queue[match_index].get('url') == next_item.get('url'):
+            tweet_queue.pop(match_index)
+        else:
+            tweet_queue = [it for it in tweet_queue if it.get('url') != next_item.get('url')]
+
+    review_dict[str(delivered_msg_id)] = next_item
+    unreviewed_count += 1
+    save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, review_dict, keys={"queue", "unreviewed_count", "review_dict"})
+    return True
 async def drip_job(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
     chat_id = job.chat_id
@@ -873,7 +881,7 @@ async def auto_scrape_job(context: ContextTypes.DEFAULT_TYPE):
         return
     list_id = active_url.split('?')[0].split('#')[0].rstrip('/').split('/')[-1]
     try:
-        items = await extract_media_from_twitter(list_id)
+        items = await extract_media_from_twitter(list_id, target_count=target_count)
         if not items:
             return
         history_set = set(history)
@@ -911,9 +919,11 @@ async def fill_buffer(chat_id, context: ContextTypes.DEFAULT_TYPE, notify_if_emp
         return
 
     if not tweet_queue:
-        if notify_if_empty:
-            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ The queue is empty! Run /scrape to fetch fresh posts from List {active_list}.")
-        return
+        await do_scrape(context, chat_id, target_count=30)
+        if not tweet_queue:
+            if notify_if_empty:
+                await context.bot.send_message(chat_id=chat_id, text=f"⚠️ The queue is empty! Run /scrape to fetch fresh posts from List {active_list}.")
+            return
 
     if unreviewed_count >= 5:
         if notify_if_empty:
@@ -926,7 +936,7 @@ async def fill_buffer(chat_id, context: ContextTypes.DEFAULT_TYPE, notify_if_emp
             success = await send_next_tweet(chat_id, context)
             if not success:
                 break
-            await asyncio.sleep(1)  # ponytail: small delay prevents Telegram rate limits on free tier
+            await asyncio.sleep(0.1)
     finally:
         is_filling = False
 
@@ -1178,13 +1188,16 @@ async def cleanup_reviewed_message(query, action):
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global unreviewed_count, custom_list_url, active_list, bot_stats, last_skipped, tweet_queue, history, media_filter, custom_cookies, include_retweets, list1_url, list2_url, review_dict
     query = update.callback_query
-    await query.answer()
     action = query.data
     chat_id = update.effective_chat.id if update.effective_chat else query.message.chat_id
+    
+    # 1. Answer callback toast once (Finding 9)
     if action == "like":
         await query.answer("❤️ Saved to channel!")
     elif action == "skip":
         await query.answer("🗑️ Skipped")
+    elif not action.startswith("switch_list:"):
+        await query.answer()
     
     try:
         msg_id_str = str(query.message.message_id)
@@ -1216,58 +1229,60 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text("Error: You haven't set a Channel ID yet! Use /channel <id>")
                 return
                 
-            if is_album_control:
-                copied = False
-                if album_mids:
-                    try:
-                        await context.bot.copy_messages(
-                            chat_id=channel_id,
-                            from_chat_id=query.message.chat_id,
-                            message_ids=album_mids
+            # Background task for channel copying & chat cleanup (Finding 2)
+            async def _do_like_transfer():
+                try:
+                    if is_album_control:
+                        copied = False
+                        if album_mids:
+                            try:
+                                await context.bot.copy_messages(
+                                    chat_id=channel_id,
+                                    from_chat_id=chat_id,
+                                    message_ids=album_mids
+                                )
+                                copied = True
+                            except Exception as e:
+                                print(f"Copy messages failed for album {album_mids}: {e}")
+                        if not copied and item and item.get('urls'):
+                            try:
+                                photo_urls = item.get('urls', [item.get('url')])
+                                caption_text = html.escape(item.get('text', '')[:800])
+                                author = item.get('screen_name', 'unknown')
+                                author_label = f"@{author}" if author != 'unknown' else "Link to Tweet"
+                                src_num = item.get('source_list_num')
+                                list_label = f" • <i>List {src_num}</i>" if src_num else ""
+                                cap = f"{caption_text}\n\n<a href='{item.get('tweet_url')}'>{author_label}</a>{list_label}"
+                                input_media = [
+                                    InputMediaPhoto(media=u, caption=cap, parse_mode="HTML")
+                                    if i == 0 else InputMediaPhoto(media=u)
+                                    for i, u in enumerate(photo_urls)
+                                ]
+                                await context.bot.send_media_group(chat_id=channel_id, media=input_media)
+                            except Exception as e:
+                                print(f"Direct album send to channel failed: {e}")
+                    else:
+                        if "Choose action:" not in msg_text:
+                            try:
+                                await context.bot.copy_message(
+                                    chat_id=channel_id,
+                                    from_chat_id=chat_id,
+                                    message_id=msg_id_int
+                                )
+                            except Exception as e:
+                                print(f"Copy to channel failed: {e}")
+                finally:
+                    # Clean up album media messages in parallel (Finding 5)
+                    if is_album_control and album_mids:
+                        await asyncio.gather(
+                            *[context.bot.delete_message(chat_id=chat_id, message_id=mid) for mid in album_mids],
+                            return_exceptions=True
                         )
-                        copied = True
-                    except Exception as e:
-                        print(f"Copy messages failed for album {album_mids}: {e}")
-                if not copied and item and item.get('urls'):
-                    try:
-                        photo_urls = item.get('urls', [item.get('url')])
-                        caption_text = html.escape(item.get('text', '')[:800])
-                        author = item.get('screen_name', 'unknown')
-                        author_label = f"@{author}" if author != 'unknown' else "Link to Tweet"
-                        src_num = item.get('source_list_num')
-                        list_label = f" • <i>List {src_num}</i>" if src_num else ""
-                        cap = f"{caption_text}\n\n<a href='{item.get('tweet_url')}'>{author_label}</a>{list_label}"
-                        input_media = [
-                            InputMediaPhoto(media=u, caption=cap, parse_mode="HTML")
-                            if i == 0 else InputMediaPhoto(media=u)
-                            for i, u in enumerate(photo_urls)
-                        ]
-                        await context.bot.send_media_group(chat_id=channel_id, media=input_media)
-                    except Exception as e:
-                        print(f"Direct album send to channel failed: {e}")
-            else:
-                # Normal single photo / video: verify this is NOT an unrecognized text control message
-                if "Choose action:" not in msg_text:
-                    try:
-                        await context.bot.copy_message(
-                            chat_id=channel_id,
-                            from_chat_id=query.message.chat_id,
-                            message_id=query.message.message_id
-                        )
-                    except Exception as e:
-                        print(f"Copy to channel failed: {e}")
-            
-            # Clean up the media messages in chat
-            if is_album_control and album_mids:
-                for mid in album_mids:
-                    try:
-                        await context.bot.delete_message(chat_id=query.message.chat_id, message_id=mid)
-                    except Exception as e:
-                        print(f"Failed to delete album media message {mid}: {e}")
-            
-            # Clean up the interactive control message
-            await cleanup_reviewed_message(query, "like")
-            
+                    # Clean up interactive control message
+                    await cleanup_reviewed_message(query, "like")
+
+            asyncio.create_task(_do_like_transfer())
+
             review_dict.pop(msg_id_str, None)
             review_dict.pop(msg_id_int, None)
             unreviewed_count = max(0, unreviewed_count - 1)
@@ -1278,12 +1293,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if item:
                 last_skipped = item
                 
+            # Clean up album media messages in parallel (Finding 5)
             if is_album_control and album_mids:
-                for mid in album_mids:
-                    try:
-                        await context.bot.delete_message(chat_id=query.message.chat_id, message_id=mid)
-                    except Exception as e:
-                        print(f"Failed to delete album media message {mid}: {e}")
+                await asyncio.gather(
+                    *[context.bot.delete_message(chat_id=chat_id, message_id=mid) for mid in album_mids],
+                    return_exceptions=True
+                )
                 
             await cleanup_reviewed_message(query, "skip")
             review_dict.pop(msg_id_str, None)
@@ -1353,7 +1368,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif action == "scrape_active":
             await query.answer("Starting scrape...")
-            await do_scrape(context, query.message.chat_id)
+            await do_scrape(context, query.message.chat_id, target_count=50)
             if tweet_queue:
                 asyncio.ensure_future(fill_buffer(chat_id, context))
             return
@@ -1364,7 +1379,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"Error in button_handler: {e}")
         import traceback
         traceback.print_exc()
-
 async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     channel_id = str(update.channel_post.chat.id)
     config['telegram_channel_id'] = channel_id
