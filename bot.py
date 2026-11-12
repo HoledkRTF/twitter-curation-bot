@@ -43,7 +43,8 @@ except Exception as e:
     print(f"Failed to connect to Apify KV Store: {e}")
     store_client = None
 
-_storage_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+_storage_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+_active_background_tasks = set()
 
 def _sync_set_records(records):
     for k, v in records.items():
@@ -245,8 +246,9 @@ def extract_media_from_tweet_node(tweet_node):
                 pass
     return media_list
 
-async def extract_media_from_twitter(list_id, target_count=None):
+async def extract_media_from_twitter(list_id, target_count=None, known_urls=None):
     extracted_items = []
+    new_items_found = 0
     
     active_ct0 = custom_cookies.get('ct0') or config['twitter_ct0']
     active_auth_token = custom_cookies.get('auth_token') or config['twitter_auth_token']
@@ -386,6 +388,8 @@ async def extract_media_from_twitter(list_id, target_count=None):
                                         album_obj['width'] = orig['width']
                                         album_obj['height'] = orig['height']
                                     extracted_items.append(album_obj)
+                                    if known_urls is None or not any(u in known_urls for u in photo_urls):
+                                        new_items_found += 1
                             elif len(photos) == 1:
                                 m = photos[0]
                                 p_url = m.get('media_url_https') or m.get('media_url')
@@ -403,6 +407,8 @@ async def extract_media_from_twitter(list_id, target_count=None):
                                     media_obj['width'] = orig['width']
                                     media_obj['height'] = orig['height']
                                 extracted_items.append(media_obj)
+                                if known_urls is None or p_url not in known_urls:
+                                    new_items_found += 1
                                 
                             for m in videos:
                                 media_obj = {'tweet_url': tweet_url, 'text': tweet_text, 'screen_name': screen_name}
@@ -422,10 +428,16 @@ async def extract_media_from_twitter(list_id, target_count=None):
                                     media_obj['url'] = sorted_mp4s[0]['url'] # Keep primary for backwards compatibility
                                     media_obj['type'] = 'video'
                                     extracted_items.append(media_obj)
+                                    v_urls = media_obj.get('urls', [media_obj['url']])
+                                    if known_urls is None or not any(vu in known_urls for vu in v_urls):
+                                        new_items_found += 1
                                         
-            # If we didn't get a new cursor, or we reached target count, stop paginating early
-            max_limit = target_count if target_count else 500
-            if not new_cursor or len(extracted_items) >= max_limit:
+            # If we didn't get a new cursor, or we have found enough brand-new items, stop paginating early
+            if not new_cursor:
+                break
+            if target_count and new_items_found >= target_count:
+                break
+            if not target_count and len(extracted_items) >= 500:
                 break
             cursor = new_cursor
             
@@ -435,7 +447,8 @@ async def extract_media_from_twitter(list_id, target_count=None):
             print(f"Error making GraphQL request: {e}")
             if "cookies" in str(e).lower() or "expired" in str(e).lower():
                 raise e
-                break
+            # Break immediately on network / API errors to avoid compounding 10x timeouts (Finding 2)
+            break
                 
     return extracted_items
 
@@ -450,11 +463,18 @@ def get_scrape_lock():
 async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int, target_count: int = None):
     global tweet_queue, history, unreviewed_count
     lock = get_scrape_lock()
-    if lock.locked():
-        await context.bot.send_message(chat_id=chat_id, text="⏳ A scrape is already running in the background. Please wait for it to finish!")
-        return
+    was_locked = lock.locked()
+    if was_locked:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text="⏳ A scrape is already running in the background. Waiting for it to finish...")
+        except Exception:
+            pass
 
     async with lock:
+        # If lock was already held and the queue now has items, return immediately without re-scraping (Finding 5)
+        if was_locked and target_count and len(tweet_queue) >= target_count:
+            return
+
         await context.bot.send_message(chat_id=chat_id, text=f"🔄 Scraping Twitter List {active_list}...")
         
         try:
@@ -471,7 +491,10 @@ async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int, target_cou
                 return
                 
             list_id = active_url.split('?')[0].split('#')[0].rstrip('/').split('/')[-1]
-            items = await extract_media_from_twitter(list_id, target_count=target_count)
+            history_set = set(history)
+            queue_urls = {q.get('url') for q in tweet_queue}
+            known_urls = history_set | queue_urls
+            items = await extract_media_from_twitter(list_id, target_count=target_count, known_urls=known_urls)
             
             count = 0
             added_items = []
@@ -506,7 +529,7 @@ async def do_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int, target_cou
                 await context.bot.send_message(chat_id=chat_id, text=f"❌ Error scraping: {e}")
 
 async def scrape_tweets(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await do_scrape(context, update.message.chat_id)
+    await do_scrape(context, update.message.chat_id, target_count=50)
     if tweet_queue:
         await send_next_tweet(update.message.chat_id, context)
 
@@ -528,7 +551,7 @@ def get_http_client():
 
 # Dead gofile / temp helpers pruned for ponytail simplicity
 
-VERSION = "v1.20.0"
+VERSION = "v1.21.0"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     global tweet_queue, history, unreviewed_count, bot_stats
@@ -880,8 +903,11 @@ async def auto_scrape_job(context: ContextTypes.DEFAULT_TYPE):
     if not active_url:
         return
     list_id = active_url.split('?')[0].split('#')[0].rstrip('/').split('/')[-1]
+    history_set = set(history)
+    queue_urls = {q.get('url') for q in tweet_queue}
+    known_urls = history_set | queue_urls
     try:
-        items = await extract_media_from_twitter(list_id, target_count=target_count)
+        items = await extract_media_from_twitter(list_id, target_count=30, known_urls=known_urls)
         if not items:
             return
         history_set = set(history)
@@ -1229,11 +1255,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text("Error: You haven't set a Channel ID yet! Use /channel <id>")
                 return
                 
-            # Background task for channel copying & chat cleanup (Finding 2)
+            # Background task for channel copying & chat cleanup (Findings 2, 3 & 8)
             async def _do_like_transfer():
+                copy_success = False
                 try:
                     if is_album_control:
-                        copied = False
                         if album_mids:
                             try:
                                 await context.bot.copy_messages(
@@ -1241,10 +1267,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     from_chat_id=chat_id,
                                     message_ids=album_mids
                                 )
-                                copied = True
+                                copy_success = True
                             except Exception as e:
                                 print(f"Copy messages failed for album {album_mids}: {e}")
-                        if not copied and item and item.get('urls'):
+                        if not copy_success and item and item.get('urls'):
                             try:
                                 photo_urls = item.get('urls', [item.get('url')])
                                 caption_text = html.escape(item.get('text', '')[:800])
@@ -1259,6 +1285,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     for i, u in enumerate(photo_urls)
                                 ]
                                 await context.bot.send_media_group(chat_id=channel_id, media=input_media)
+                                copy_success = True
                             except Exception as e:
                                 print(f"Direct album send to channel failed: {e}")
                     else:
@@ -1269,19 +1296,34 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     from_chat_id=chat_id,
                                     message_id=msg_id_int
                                 )
+                                copy_success = True
                             except Exception as e:
                                 print(f"Copy to channel failed: {e}")
+                except Exception as e:
+                    print(f"Error in _do_like_transfer: {e}")
                 finally:
-                    # Clean up album media messages in parallel (Finding 5)
-                    if is_album_control and album_mids:
-                        await asyncio.gather(
-                            *[context.bot.delete_message(chat_id=chat_id, message_id=mid) for mid in album_mids],
-                            return_exceptions=True
-                        )
-                    # Clean up interactive control message
-                    await cleanup_reviewed_message(query, "like")
+                    if copy_success:
+                        # Clean up album media messages in parallel (Finding 5)
+                        if is_album_control and album_mids:
+                            await asyncio.gather(
+                                *[context.bot.delete_message(chat_id=chat_id, message_id=mid) for mid in album_mids],
+                                return_exceptions=True
+                            )
+                        # Clean up interactive control message
+                        await cleanup_reviewed_message(query, "like")
+                    else:
+                        # Report failure so item is not silently lost (Finding 3)
+                        try:
+                            await context.bot.send_message(
+                                chat_id=chat_id,
+                                text="⚠️ Failed to copy item to your channel! Please verify channel ID and bot admin rights."
+                            )
+                        except Exception:
+                            pass
 
-            asyncio.create_task(_do_like_transfer())
+            transfer_task = asyncio.create_task(_do_like_transfer())
+            _active_background_tasks.add(transfer_task)
+            transfer_task.add_done_callback(_active_background_tasks.discard)
 
             review_dict.pop(msg_id_str, None)
             review_dict.pop(msg_id_int, None)
@@ -1385,6 +1427,13 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     os.environ['TELEGRAM_CHANNEL_ID'] = channel_id
     print(f"Auto-detected Channel ID: {channel_id}")
 
+async def post_shutdown(application: Application):
+    if _active_background_tasks:
+        print(f"Waiting for {len(_active_background_tasks)} pending background tasks to finish...")
+        await asyncio.gather(*_active_background_tasks, return_exceptions=True)
+    if _storage_executor:
+        _storage_executor.shutdown(wait=True)
+
 async def post_init(application: Application):
     try:
         await application.bot.delete_webhook(drop_pending_updates=False)
@@ -1423,7 +1472,7 @@ def main():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
-    app = ApplicationBuilder().token(config['telegram_bot_token']).read_timeout(60.0).write_timeout(60.0).connect_timeout(60.0).pool_timeout(60.0).post_init(post_init).build()
+    app = ApplicationBuilder().token(config['telegram_bot_token']).read_timeout(60.0).write_timeout(60.0).connect_timeout(60.0).pool_timeout(60.0).post_init(post_init).post_shutdown(post_shutdown).build()
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("lists", lists_command))
