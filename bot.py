@@ -73,12 +73,13 @@ def load_data():
     list2_url = ""
     active_list = "1"
     review_dict = {}
+    proxy_url = os.environ.get('TWITTER_PROXY') or os.environ.get('PROXY_URL') or config.get('twitter_proxy', '')
     
     if store_client:
         keys_to_fetch = [
             "queue", "history", "unreviewed_count", "media_filter",
             "custom_cookies", "include_retweets", "list1_url", "custom_list_url",
-            "list2_url", "active_list", "bot_stats", "review_dict"
+            "list2_url", "active_list", "bot_stats", "review_dict", "proxy_url"
         ]
         results = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
@@ -167,13 +168,17 @@ def load_data():
                 if isinstance(it, dict) and it.get('tweet_url') and '/unknown/' in it['tweet_url']:
                     it['tweet_url'] = it['tweet_url'].replace('/unknown/', '/i/')
 
+        p_rec = results.get("proxy_url")
+        if p_rec and p_rec.get('value'):
+            proxy_url = str(p_rec['value'])
+
     if not list1_url:
         list1_url = config['twitter_list_url']
     custom_list_url = list2_url if (active_list == "2" and list2_url) else list1_url
             
-    return tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, list1_url, list2_url, active_list, review_dict
+    return tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, list1_url, list2_url, active_list, review_dict, proxy_url
 
-tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, list1_url, list2_url, active_list, review_dict = load_data()
+tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, list1_url, list2_url, active_list, review_dict, proxy_url = load_data()
 
 def get_active_list_url():
     if active_list == "2" and list2_url:
@@ -191,11 +196,11 @@ def save_lists():
         }
         _storage_executor.submit(_sync_set_records, records)
 
-def save_data(tweet_queue=None, history=None, unreviewed_count=None, media_filter=None, custom_cookies=None, include_retweets=None, custom_list_url=None, bot_stats=None, review_dict=None, keys=None):
+def save_data(tweet_queue=None, history=None, unreviewed_count=None, media_filter=None, custom_cookies=None, include_retweets=None, custom_list_url=None, bot_stats=None, review_dict=None, proxy_url_val=None, keys=None):
     if not store_client:
         return
     if keys is None:
-        keys = {"queue", "history", "unreviewed_count", "media_filter", "custom_cookies", "include_retweets", "custom_list_url", "bot_stats", "review_dict"}
+        keys = {"queue", "history", "unreviewed_count", "media_filter", "custom_cookies", "include_retweets", "custom_list_url", "bot_stats", "review_dict", "proxy_url"}
     records = {}
     if "queue" in keys:
         val = tweet_queue if tweet_queue is not None else globals().get('tweet_queue', [])
@@ -223,6 +228,8 @@ def save_data(tweet_queue=None, history=None, unreviewed_count=None, media_filte
         records["bot_stats"] = dict(bot_stats if bot_stats is not None else globals().get('bot_stats', {}))
     if "review_dict" in keys:
         records["review_dict"] = dict(review_dict if review_dict is not None else globals().get('review_dict', {}))
+    if "proxy_url" in keys or "proxy" in keys:
+        records["proxy_url"] = proxy_url_val if proxy_url_val is not None else globals().get('proxy_url', '')
 
     _storage_executor.submit(_sync_set_records, records)
 
@@ -548,18 +555,32 @@ async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_data(tweet_queue, history, unreviewed_count, media_filter, custom_cookies, include_retweets, custom_list_url, bot_stats, keys={"history", "unreviewed_count"})
     await update.message.reply_text("🗑️ History cleared! The scraper will now re-fetch older tweets as if they were brand new.")
 
-# Reuse TCP connections
+# Reuse TCP connections with dynamic proxy routing
 _http_client = None
 
 def get_http_client():
     global _http_client
     if _http_client is None:
-        _http_client = httpx.AsyncClient(timeout=180.0)
+        client_kwargs = {"timeout": 180.0, "trust_env": True}
+        if proxy_url:
+            client_kwargs["proxy"] = proxy_url
+        _http_client = httpx.AsyncClient(**client_kwargs)
     return _http_client
+
+async def set_proxy(new_proxy: str):
+    global _http_client, proxy_url
+    proxy_url = new_proxy.strip() if new_proxy else ""
+    if _http_client is not None:
+        try:
+            await _http_client.aclose()
+        except Exception:
+            pass
+        _http_client = None
+    save_data(proxy_url_val=proxy_url, keys={"proxy_url"})
 
 # Dead gofile / temp helpers pruned for ponytail simplicity
 
-VERSION = "v1.22.0"
+VERSION = "v1.23.0"
 
 async def send_next_tweet(chat_id, context: ContextTypes.DEFAULT_TYPE):
     global tweet_queue, history, unreviewed_count, bot_stats
@@ -985,6 +1006,71 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def version_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(VERSION)
 
+
+async def proxy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global proxy_url
+    if not context.args:
+        if proxy_url:
+            masked = re.sub(r'://([^:@]+):([^@]+)@', r'://\1:***@', proxy_url)
+            await update.message.reply_text(
+                f"🌐 <b>Active Proxy:</b>\n<code>{html.escape(masked)}</code>\n\n"
+                f"Commands:\n"
+                f"• <code>/proxy &lt;url&gt;</code> - Set new proxy (HTTP/SOCKS5)\n"
+                f"• <code>/proxy off</code> - Disable proxy and use direct connection",
+                parse_mode="HTML"
+            )
+        else:
+            await update.message.reply_text(
+                "🌐 <b>No proxy configured.</b>\n"
+                "The bot connects directly through the server's local IP.\n\n"
+                "To set a US/EU proxy (to unblock geo-restricted NSFW posts):\n"
+                "<code>/proxy http://user:pass@host:port</code>\n"
+                "or\n"
+                "<code>/proxy socks5://host:port</code>",
+                parse_mode="HTML"
+            )
+        return
+
+    arg = context.args[0].strip()
+    if arg.lower() in ['off', 'none', 'clear', 'disable']:
+        await set_proxy("")
+        await update.message.reply_text("✅ Proxy disabled. The bot is now using direct connection.")
+        return
+
+    new_p = arg
+    if not new_p.startswith(('http://', 'https://', 'socks5://', 'socks5h://')):
+        new_p = 'http://' + new_p
+
+    status_msg = await update.message.reply_text("⏳ Testing proxy connection to verify egress location...")
+    try:
+        test_client = httpx.AsyncClient(proxy=new_p, timeout=12.0)
+        res = await test_client.get("https://ipinfo.io/json")
+        await test_client.aclose()
+        if res.status_code == 200:
+            geo = res.json()
+            ip = geo.get('ip', 'Unknown')
+            country = geo.get('country', 'Unknown')
+            city = geo.get('city', 'Unknown')
+            await set_proxy(new_p)
+            masked = re.sub(r'://([^:@]+):([^@]+)@', r'://\1:***@', new_p)
+            await status_msg.edit_text(
+                f"✅ <b>Proxy connected successfully!</b>\n\n"
+                f"🌍 <b>Egress Location:</b> {city}, {country} ({ip})\n"
+                f"🔗 <b>Active Proxy:</b> <code>{html.escape(masked)}</code>\n\n"
+                f"All future Twitter scrapes and media downloads will now route through this proxy.",
+                parse_mode="HTML"
+            )
+        else:
+            await set_proxy(new_p)
+            await status_msg.edit_text(f"⚠️ Proxy set, but test returned HTTP {res.status_code}.")
+    except Exception as e:
+        await status_msg.edit_text(
+            f"❌ <b>Proxy test failed:</b> {html.escape(str(e))}\n\n"
+            f"Please verify the host, port, and credentials.\n"
+            f"Format: <code>/proxy http://user:pass@host:port</code>",
+            parse_mode="HTML"
+        )
+
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global tweet_queue, unreviewed_count, media_filter, active_list
     msg = f"📊 *Bot Status*\n\n"
@@ -992,7 +1078,12 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += f"👀 Unreviewed Buffer: {unreviewed_count}\n"
     msg += f"🎛️ Active Filter: {media_filter}\n"
     msg += f"📋 Active List: List {active_list} ({get_active_list_url()})\n"
-    msg += f"🤖 Version: {VERSION}"
+    msg += f"🤖 Version: {VERSION}\n"
+    if proxy_url:
+        masked_p = re.sub(r'://([^:@]+):([^@]+)@', r'://\1:***@', proxy_url)
+        msg += f"🌐 Proxy: `{masked_p}`"
+    else:
+        msg += "🌐 Proxy: Direct (No proxy)"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def set_counter_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1483,6 +1574,7 @@ async def post_init(application: Application):
         ("setcookies", "Update Twitter cookies"),
         ("rt", "Toggle retweets (on/off)"),
         ("v", "Check current bot version"),
+        ("proxy", "Check or set outbound proxy (e.g. /proxy <url> or /proxy off)"),
     ])
 
 def main():
@@ -1509,6 +1601,7 @@ def main():
     app.add_handler(CommandHandler("clearhistory", clear_history))
     app.add_handler(CommandHandler("next", next_command))
     app.add_handler(CommandHandler("v", version_command))
+    app.add_handler(CommandHandler("proxy", proxy_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("setcounter", set_counter_command))
     app.add_handler(CommandHandler("fv", filter_video))
